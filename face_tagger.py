@@ -80,7 +80,7 @@ MODEL_MIN_SIZE = 100_000
 
 THUMBNAIL_SIZE = 96          # Côté (en pixels) des vignettes de visages
 TREE_ROW_HEIGHT = 44         # Hauteur des lignes de la liste des personnes
-MAX_FACES_SHOWN = 150        # Nombre maximal de vignettes affichées pour une personne
+MAX_FACES_SHOWN = 1500       # Nombre maximal de vignettes affichées pour une personne
 CACHE_VERSION = 1            # À incrémenter si le format du cache change
 REGION_MATCH_IOU = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
 EXIFTOOL_BATCH = 25          # Nombre de photos modifiées par appel à ExifTool
@@ -111,6 +111,16 @@ def emoji(text: str) -> str:
 	if SETTINGS["emoji"]:
 		return text
 	return EMOJI_PATTERN.sub("", text).strip()
+
+def resource_path(relative_path):
+	"""Obtient le chemin absolu vers la ressource, fonctionne pour le dev et PyInstaller."""
+	try:
+		# PyInstaller crée un dossier temporaire et stocke le chemin dans _MEIPASS
+		base_path = sys._MEIPASS
+	except AttributeError:
+		base_path = os.path.abspath(".")
+
+	return os.path.join(base_path, relative_path)
 
 
 def strip_widget_emoji(widget: tk.Misc) -> None:
@@ -956,6 +966,8 @@ class FaceTaggerApp(tk.Tk):
 		super().__init__()
 		self.options = options
 		self.title(emoji("👥 Face Tagger — visages par personne"))
+		icon_file = resource_path("face_tagger.ico")
+		self.iconbitmap(icon_file)
 		self.geometry("1300x820")
 		self.data_directory = Path(options.data_directory).expanduser()
 		self.exiftool = ExifTool(options.exiftool)

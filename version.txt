@@ -1,0 +1,43 @@
+# UTF-8
+#
+# Script de structure de version pour PyInstaller
+#
+VSVersionInfo(
+	ffi=FixedFileInfo(
+		# Le numéro de version du fichier (tuple de 4 entiers)
+		filevers=(1, 0, 0, 0),
+		# Le numéro de version du produit (tuple de 4 entiers)
+		prodvers=(1, 0, 0, 0),
+		# Masque des attributs
+		mask=0x3f,
+		# Indicateurs (0x0 = normal, 0x1 = debug, etc.)
+		flags=0x0,
+		# Système d'exploitation (0x4 = NT/Windows)
+		OS=0x40004,
+		# Type de fichier (0x1 = Application)
+		fileType=0x1,
+		subtype=0x0,
+		# Date (non utilisée en général)
+		date=(0, 0)
+	),
+	kids=[
+		StringFileInfo(
+			[
+				StringTable(
+					'040c04b0',	 # Langue : Français (040c), Encodage : Unicode/UTF-16 (04b0)
+					[
+						StringStruct('CompanyName', 'ILP-Web Network'),
+						StringStruct('FileDescription', 'Utilitaire de reconnaissance faciale pour photos'),
+						StringStruct('FileVersion', '1.0.0.0'),
+						StringStruct('InternalName', 'face_tagger'),
+						StringStruct('LegalCopyright', 'Copyright © 2026 PLAIS Lionel. MIT License.'),
+						StringStruct('OriginalFilename', 'face_tagger.exe'),
+						StringStruct('ProductName', 'Face Tagger — visages par personne'),
+						StringStruct('ProductVersion', '1.0.0.0'),
+					]
+				)
+			]
+		),
+		VarFileInfo([VarStruct('Translation', [1036, 1200])]) # 1036 = Français (0x040C), 1200 = Unicode (0x04B0)
+	]
+)

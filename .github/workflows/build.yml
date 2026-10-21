@@ -39,7 +39,6 @@ jobs:
           --icon=face_tagger.ico \
           --version-file=version.txt \
           --add-data "face_tagger.ico;." \
-          --add-data "assets;assets" \
           face_tagger.py
       shell: bash
 
@@ -53,7 +52,6 @@ jobs:
         pyinstaller --onefile \
           --icon=face_tagger.ico \
           --add-data "face_tagger.ico:." \
-          --add-data "assets:assets" \
           face_tagger.py
       shell: bash
 

@@ -65,7 +65,8 @@ python restore_originals.py --directory "D:\Photos" --action delete --yes
 - Les trois fichiers `.py` restent **dans le même dossier** : PyInstaller embarque `face_database` et `restore_originals` grâce aux imports (vérifié par un build réel).
 - `version.txt` (infos de version Windows) est à **1.0.0.0** alors que le dernier tag est **v1.0.4** : à resynchroniser à chaque publication.
 - En mode fenêtré (`--noconsole`), `sys.stdout` et `sys.stderr` valent `None` : `print()` reste sans effet (pas de plantage), mais les `sys.exit("message")` du démarrage sont invisibles. Amélioration possible : les afficher dans une `messagebox`.
-- Icône : `iconbitmap()` avec un `.ico` lève une `TclError` sous Linux/macOS, l'appel est donc protégé par `try/except`. `resource_path()` lit `sys._MEIPASS` sous PyInstaller, sinon le **dossier courant** (l'icône n'est trouvée en développement que si on lance depuis le dossier du dépôt).
+- Icône : `iconbitmap(default = …)` (les boîtes de dialogue en héritent) ; avec un `.ico`, l'appel lève une `TclError` sous Linux/macOS et est donc protégé par `try/except`. `resource_path()` lit `sys._MEIPASS` sous PyInstaller, sinon le **dossier du script** : l'ancienne version cherchait dans le dossier courant, et une fois lancée hors du dépôt, l'application montrait la plume de Tk dans la barre des tâches (vérifié par capture d'écran).
+- Barre des tâches de Windows : `set_windows_app_id()` déclare l'`AppUserModelID` `ILPlais.FaceTagger` avant la création de la fenêtre. Sinon, lancée par `python face_tagger.py`, la fenêtre est rattachée à python.exe, et en mode « regrouper les boutons » Windows affiche l'icône de Python (comportement documenté, non reproduit : la barre des tâches de Lionel ne regroupe jamais).
 
 ## Architecture
 

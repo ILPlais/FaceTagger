@@ -34,6 +34,7 @@ Exemple :
 from __future__ import annotations
 
 import argparse
+import ctypes
 import io
 import json
 import math
@@ -101,6 +102,9 @@ ICON_CACHE_SIZE = 4000       # Nombre maximal d'icônes de la liste des personne
 REGION_MATCH_IOU = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
 EXIFTOOL_BATCH = 25          # Nombre de photos modifiées par appel à ExifTool
 
+# Identifiant de l'application pour la barre des tâches de Windows (voir set_windows_app_id)
+APP_USER_MODEL_ID = "ILPlais.FaceTagger"
+
 # Réglages globaux modifiables par la ligne de commande
 SETTINGS = {"emoji": True}
 
@@ -134,9 +138,28 @@ def resource_path(relative_path):
 		# PyInstaller crée un dossier temporaire et stocke le chemin dans _MEIPASS
 		base_path = sys._MEIPASS
 	except AttributeError:
-		base_path = os.path.abspath(".")
+		# En développement : dossier du script, et non le dossier courant, pour trouver l'icône même quand
+		# l'application est lancée depuis un autre dossier (raccourci, autre terminal…)
+		base_path = os.path.dirname(os.path.abspath(__file__))
 
 	return os.path.join(base_path, relative_path)
+
+
+def set_windows_app_id() -> None:
+	"""Donne à l'application sa propre identité dans la barre des tâches de Windows.
+
+	Lancé par « python face_tagger.py », le programme est vu par Windows comme python.exe : la barre des
+	tâches regroupe alors sa fenêtre avec Python et affiche l'icône de Python au lieu de celle de la fenêtre.
+	Un identifiant d'application explicite (AppUserModelID) l'en sépare. L'identifiant vaut pour tout le
+	processus et doit être déclaré avant la création de la première fenêtre.
+	"""
+	if sys.platform != "win32":
+		return
+	try:
+		ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+	except (AttributeError, OSError):
+		# Fonction absente ou appel refusé : seule l'icône de la barre des tâches est en jeu, on continue
+		pass
 
 
 def strip_widget_emoji(widget: tk.Misc) -> None:
@@ -998,14 +1021,17 @@ class FaceTaggerApp(tk.Tk):
 	"""Fenêtre principale de l'application."""
 
 	def __init__(self, options: argparse.Namespace):
+		# Avant super().__init__() : l'identité dans la barre des tâches doit précéder la création de la fenêtre
+		set_windows_app_id()
 		super().__init__()
 		self.options = options
 		self.title(emoji("👥 Face Tagger — visages par personne"))
-		# Icône de la fenêtre. Linux et macOS refusent les fichiers .ico (TclError) : sans icône, l'application
-		# démarre quand même, de même si le fichier est introuvable.
+		# Icône de la fenêtre, et par défaut de toutes les boîtes de dialogue (Toplevel). Linux et macOS refusent
+		# les fichiers .ico (TclError) : sans icône, l'application démarre quand même, de même si le fichier est
+		# introuvable.
 		try:
 			icon_file = resource_path("face_tagger.ico")
-			self.iconbitmap(icon_file)
+			self.iconbitmap(default = icon_file)
 		except tk.TclError:
 			pass
 		self.geometry("1300x820")

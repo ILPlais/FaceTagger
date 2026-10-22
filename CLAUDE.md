@@ -58,7 +58,10 @@ python restore_originals.py --directory "D:\Photos" --action delete --yes
 ## Compilation
 
 - **En local** : `pyinstaller face_tagger.spec` (onefile, `console = False`, icône, `version.txt`, `face_tagger.ico` en données). Le `.spec` est ignoré par git (`*.spec` dans `.gitignore`) : il n'existe que sur le poste de Lionel.
-- **GitHub Actions** (`.github/workflows/build.yml`) : déclenché par un **tag `v*`** (matrice ubuntu / macos / windows, Python 3.11). Il appelle `pyinstaller --onefile` directement (sans le `.spec`) et publie `dist/*` dans la Release.
+- **GitHub Actions** (`.github/workflows/build.yml`) : déclenché par la **publication d'une release** (`release: published`, Lionel les crée depuis la page Releases du site) ou **à la main** depuis l'onglet Actions (`workflow_dispatch`, en saisissant le tag). Matrice ubuntu / macos / windows, Python 3.11. Il appelle `pyinstaller --onefile` directement (sans le `.spec`) et publie `dist/*` dans la Release.
+	- L'ancien déclencheur `push: tags` ne partait pas, et aucun nouveau tag n'existait sur GitHub. Causes probables (non vérifiées, faute d'accès à l'onglet Actions) : une release en **brouillon** ne crée pas son tag, et une release qui reprend un tag existant ne pousse aucun tag. Une release brouillon ne déclenche aucun workflow : il faut la **publier**.
+	- GitHub lit le workflow **dans le commit du tag** : les tags `v1.0.0` et `v1.0.4` (posés sur `04d0e7c`) ont l'ancien déclencheur. Pour les recompiler, utiliser le lancement manuel.
+	- Le dépôt est **privé** : l'API GitHub répond 404 sans authentification, et `gh` n'est pas installé sur le poste.
 - Les trois fichiers `.py` restent **dans le même dossier** : PyInstaller embarque `face_database` et `restore_originals` grâce aux imports (vérifié par un build réel).
 - `version.txt` (infos de version Windows) est à **1.0.0.0** alors que le dernier tag est **v1.0.4** : à resynchroniser à chaque publication.
 - En mode fenêtré (`--noconsole`), `sys.stdout` et `sys.stderr` valent `None` : `print()` reste sans effet (pas de plantage), mais les `sys.exit("message")` du démarrage sont invisibles. Amélioration possible : les afficher dans une `messagebox`.

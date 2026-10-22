@@ -1,12 +1,30 @@
 name: Build Multi-OS Executables
 
+# Déclencheurs :
+# - publication d'une release depuis la page Releases de GitHub. Contrairement
+#   à « push: tags », l'événement est émis même quand la release reprend un tag
+#   qui existait déjà. Une release enregistrée en brouillon (« Save draft »)
+#   ne crée pas son tag et ne déclenche rien : il faut « Publish release ».
+#   GitHub lit ce fichier dans le commit du tag : un tag posé sur un commit
+#   antérieur à ce déclencheur ne lance donc rien (utiliser le lancement manuel).
+# - lancement manuel depuis l'onglet Actions (« Run workflow »), pour
+#   (re)compiler la release d'un tag existant.
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de la release à compiler (par exemple v1.0.5)'
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+# Tag à compiler : celui de la release publiée, ou celui saisi à la main.
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
   build:
@@ -17,8 +35,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
+    # Récupère le code du tag (en lancement manuel, github.ref désigne la
+    # branche choisie dans l'onglet Actions, pas le tag).
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        ref: ${{ env.RELEASE_TAG }}
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -63,6 +85,6 @@ jobs:
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
         file: dist/*
-        tag: ${{ github.ref }}
+        tag: ${{ env.RELEASE_TAG }}
         overwrite: true
         file_glob: true

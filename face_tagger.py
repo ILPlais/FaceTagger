@@ -12,7 +12,15 @@ les noms dans les métadonnées des photos.
 		PersonInImage, éventuellement mots-clés) servent à nommer automatiquement les groupes.
 	5. Les personnes non reconnues peuvent être nommées à la main dans une boîte de dialogue.
 	6. Écriture des noms via ExifTool : XMP-iptcExt:PersonInImage, régions de visages
-		XMP-mwg-rs, mots-clés XMP-dc:Subject et EXIF XPKeywords (visible dans l'Explorateur Windows).
+		XMP-mwg-rs, mots-clés XMP-dc:Subject et EXIF XPKeywords (visible dans l'Explorateur Windows),
+		suivie d'une relecture pour vérifier que les noms ont bien été écrits.
+	7. Une base SQLite (face_database.py) mémorise visages, vignettes, étiquettes lues et historique
+		des modifications : une photo inchangée n'est jamais ré-analysée ni relue.
+	8. Les visages d'une personne sont affichés page par page (seules les vignettes de la page
+		courante sont chargées en mémoire).
+	9. Les sauvegardes *_original d'ExifTool se restaurent d'un coup (bouton, ou restore_originals.py).
+
+Fichiers à placer dans le même dossier : face_tagger.py, face_database.py, restore_originals.py
 
 Dépendances :
 	pip install opencv-python pillow numpy      (+ pillow-heif pour les HEIC, optionnel)
@@ -26,9 +34,10 @@ Exemple :
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import math
 import os
-import pickle
 import queue
 import re
 import shutil
@@ -60,6 +69,13 @@ try:
 except ImportError:
 	HEIF_AVAILABLE = False
 
+# Modules compagnons (même dossier) : base SQLite et restauration des sauvegardes
+try:
+	from face_database import Database
+	import restore_originals
+except ImportError as error:
+	sys.exit(f"❌ Fichier manquant : {error}\n👉 Placez face_tagger.py, face_database.py et restore_originals.py dans le même dossier.")
+
 
 # ======================================================================================
 # Constantes
@@ -80,8 +96,8 @@ MODEL_MIN_SIZE = 100_000
 
 THUMBNAIL_SIZE = 96          # Côté (en pixels) des vignettes de visages
 TREE_ROW_HEIGHT = 44         # Hauteur des lignes de la liste des personnes
-MAX_FACES_SHOWN = 1500       # Nombre maximal de vignettes affichées pour une personne
-CACHE_VERSION = 1            # À incrémenter si le format du cache change
+MAX_FACES_SHOWN = 150        # Nombre maximal de vignettes affichées pour une personne
+ICON_CACHE_SIZE = 4000       # Nombre maximal d'icônes de la liste des personnes gardées en mémoire
 REGION_MATCH_IOU = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
 EXIFTOOL_BATCH = 25          # Nombre de photos modifiées par appel à ExifTool
 
@@ -219,6 +235,20 @@ def make_thumbnail(image: Image.Image, box: tuple[float, float, float, float]) -
 	return ImageOps.fit(crop, (THUMBNAIL_SIZE, THUMBNAIL_SIZE), Image.Resampling.LANCZOS)
 
 
+def encode_thumbnail(image: Image.Image) -> bytes:
+	"""Encode une vignette en JPEG (stockée dans la base SQLite)."""
+	buffer = io.BytesIO()
+	image.save(buffer, format = "JPEG", quality = 85)
+	return buffer.getvalue()
+
+
+def decode_thumbnail(data: Optional[bytes]) -> Image.Image:
+	"""Décode une vignette JPEG de la base (carré gris si elle est absente)."""
+	if not data:
+		return Image.new("RGB", (THUMBNAIL_SIZE, THUMBNAIL_SIZE), "#888888")
+	return Image.open(io.BytesIO(data)).convert("RGB")
+
+
 def ensure_models(models_directory: Path, log: Callable[[str], None]) -> tuple[Path, Path]:
 	"""Vérifie la présence des deux modèles ONNX et les télécharge si besoin."""
 	models_directory.mkdir(parents = True, exist_ok = True)
@@ -257,6 +287,7 @@ class PhotoTags:
 	subject: list[str] = field(default_factory = list)
 	keywords: list[str] = field(default_factory = list)
 	xp_keywords: list[str] = field(default_factory = list)
+	raw: dict = field(default_factory = dict)                    # Entrée JSON brute d'ExifTool (mémorisée en base)
 
 	def weak_names(self, use_keywords: bool) -> list[str]:
 		"""Noms « candidats » sans position dans l'image (PersonInImage et, au choix, mots-clés)."""
@@ -268,7 +299,7 @@ class PhotoTags:
 
 def parse_photo_tags(entry: dict) -> PhotoTags:
 	"""Transforme l'entrée JSON d'ExifTool pour une photo en objet PhotoTags."""
-	tags = PhotoTags()
+	tags = PhotoTags(raw = {key: value for key, value in entry.items() if key != "SourceFile"})
 
 	# Régions MWG : X/Y désignent le CENTRE du rectangle, en coordonnées normalisées
 	info = entry.get("RegionInfo")
@@ -340,8 +371,9 @@ class ExifTool:
 			creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0),
 		)
 
-	def read_tags(self, photos: list[str]) -> dict[str, dict]:
-		"""Lit les étiquettes de plusieurs photos. Retourne {path_key(photo): entrée JSON}."""
+	def read_tags(self, photos: list[str], progress: Optional[Callable[[int, int], None]] = None) -> dict[str, dict]:
+		"""Lit les étiquettes de plusieurs photos. Retourne {path_key(photo): entrée JSON}.
+		Les photos qu'ExifTool n'a pas pu lire sont absentes du résultat."""
 		result: dict[str, dict] = {}
 		for start in range(0, len(photos), 100):
 			chunk = photos[start:start + 100]
@@ -349,9 +381,11 @@ class ExifTool:
 			try:
 				entries = json.loads(completed.stdout.decode("utf-8", errors = "replace") or "[]")
 			except json.JSONDecodeError:
-				continue
+				entries = []
 			for entry in entries:
 				result[path_key(entry.get("SourceFile", ""))] = entry
+			if progress is not None:
+				progress(min(start + len(chunk), len(photos)), len(photos))
 		return result
 
 	def write_tags(self, records: list[dict], backup: bool) -> list[str]:
@@ -392,7 +426,7 @@ class FaceEngine:
 		self.recognizer = cv2.FaceRecognizerSF.create(str(recognition_model), "")
 
 	def analyse(self, photo: str) -> list[dict]:
-		"""Retourne, pour chaque visage : boîte normalisée, score, empreinte et vignette."""
+		"""Retourne, pour chaque visage : boîte normalisée, score, empreinte (octets) et vignette JPEG (octets)."""
 		with Image.open(photo) as source:
 			# Pour les JPEG, le décodage à échelle réduite accélère beaucoup les gros fichiers
 			source.draft("RGB", (self.max_image_size, self.max_image_size))
@@ -425,29 +459,10 @@ class FaceEngine:
 			results.append({
 				"box": (x0 / width, y0 / height, (x1 - x0) / width, (y1 - y0) / height),
 				"score": float(row[-1]),
-				"embedding": embedding,
-				"thumbnail": make_thumbnail(image, (x0, y0, x1, y1)),
+				"embedding": embedding.tobytes(),                 # 128 flottants de 32 bits
+				"thumbnail": encode_thumbnail(make_thumbnail(image, (x0, y0, x1, y1))),
 			})
 		return results
-
-
-def load_cache(path: Path, signature: tuple) -> dict:
-	"""Charge le cache des visages déjà analysés (vide si absent, périmé ou illisible)."""
-	try:
-		with open(path, "rb") as handle:
-			data = pickle.load(handle)
-		if data.get("version") == CACHE_VERSION and data.get("signature") == signature:
-			return data["entries"]
-	except Exception:
-		pass
-	return {}
-
-
-def save_cache(path: Path, signature: tuple, entries: dict) -> None:
-	"""Enregistre le cache pour accélérer les analyses suivantes."""
-	path.parent.mkdir(parents = True, exist_ok = True)
-	with open(path, "wb") as handle:
-		pickle.dump({"version": CACHE_VERSION, "signature": signature, "entries": entries}, handle)
 
 
 # ======================================================================================
@@ -461,7 +476,7 @@ class FaceRecord:
 	box: tuple[float, float, float, float]       # x, y, largeur, hauteur normalisés (image redressée)
 	score: float
 	embedding: np.ndarray
-	thumbnail: Image.Image
+	face_id: int                                 # Identifiant dans la base SQLite (la vignette y est lue à la demande)
 	label: Optional[str] = None                  # Nom issu d'une région déjà étiquetée dans la photo
 	person: Optional["Person"] = None
 	deleted: bool = False                        # Faux positif écarté par l'utilisateur
@@ -572,7 +587,6 @@ class Library:
 		self.faces: list[FaceRecord] = []
 		self.persons: dict[int, Person] = {}
 		self.photo_tags: dict[str, PhotoTags] = {}     # Étiquettes existantes, par photo
-		self.image_sizes: dict[str, tuple[int, int]] = {}
 		self._next_id = 1
 
 	# ---------- Association avec les étiquettes existantes ----------
@@ -739,11 +753,13 @@ class Library:
 # Construction des métadonnées à écrire
 # ======================================================================================
 
-def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> dict:
+def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> tuple[dict, dict[str, str]]:
 	"""Construit la structure XMP-mwg-rs:RegionInfo en conservant les régions déjà présentes.
 
-	Pour chaque visage nommé : si une région existante le recouvre, on la complète (nom manquant)
-	ou on la laisse telle quelle ; sinon on ajoute une nouvelle région « Face »."""
+	Pour chaque visage nommé : si une région existante le recouvre, on la complète (nom manquant) ;
+	si elle porte un autre nom, le choix actuel de l'utilisateur la remplace (personne renommée ou
+	fusionnée) ; sinon on ajoute une nouvelle région « Face ».
+	Retourne la structure et les noms remplacés {ancien nom: nouveau nom}."""
 	existing = tags.region_info or {}
 	region_list = [dict(region) for region in (existing.get("RegionList") or []) if isinstance(region, dict)]
 	info = {
@@ -759,6 +775,7 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> d
 		except (KeyError, TypeError, ValueError):
 			return None
 
+	replacements: dict[str, str] = {}
 	for name, face in items:
 		x, y, width, height = face.box
 		match = None
@@ -768,7 +785,11 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> d
 				match = region
 				break
 		if match is not None:
-			if not str(match.get("Name", "")).strip():
+			current = str(match.get("Name", "")).strip()
+			if not current:
+				match["Name"] = name
+			elif name_key(current) != name_key(name):
+				replacements[current] = name
 				match["Name"] = name
 			continue
 		region_list.append({
@@ -779,7 +800,20 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> d
 			"Name": name,
 			"Type": "Face",
 		})
-	return info
+	return info, replacements
+
+
+def check_written(tags: PhotoTags, names: list[str], regions: bool, person: bool, keywords: bool) -> bool:
+	"""Vérifie, d'après les étiquettes relues, que les noms demandés figurent bien dans la photo."""
+	wanted = {name_key(name) for name in names}
+	present = []
+	if person:
+		present.append({name_key(name) for name in tags.person_in_image})
+	if keywords:
+		present.append({name_key(name) for name in tags.subject})
+	if regions:
+		present.append({name_key(region["name"]) for region in tags.regions})
+	return all(wanted <= found for found in present)
 
 
 # ======================================================================================
@@ -925,8 +959,9 @@ class UnknownNamesDialog(tk.Toplevel):
 			child.destroy()
 		self.images.clear()
 		best = sorted(self.person.faces, key = lambda f: -f.score)[:12]
+		thumbnails = self.app.database.thumbnails([face.face_id for face in best])
 		for position, face in enumerate(best):
-			image = ImageTk.PhotoImage(face.thumbnail)
+			image = ImageTk.PhotoImage(decode_thumbnail(thumbnails.get(face.face_id)))
 			self.images.append(image)
 			ttk.Label(self.gallery, image = image).grid(row = position // 6, column = position % 6, padx = 3, pady = 3)
 		self.variable.set("")
@@ -966,19 +1001,29 @@ class FaceTaggerApp(tk.Tk):
 		super().__init__()
 		self.options = options
 		self.title(emoji("👥 Face Tagger — visages par personne"))
-		icon_file = resource_path("face_tagger.ico")
-		self.iconbitmap(icon_file)
+		# Icône de la fenêtre. Linux et macOS refusent les fichiers .ico (TclError) : sans icône, l'application
+		# démarre quand même, de même si le fichier est introuvable.
+		try:
+			icon_file = resource_path("face_tagger.ico")
+			self.iconbitmap(icon_file)
+		except tk.TclError:
+			pass
 		self.geometry("1300x820")
 		self.data_directory = Path(options.data_directory).expanduser()
 		self.exiftool = ExifTool(options.exiftool)
 		self.library = Library()
+		self.database = Database(Path(options.database).expanduser())
 		self.events: queue.Queue = queue.Queue()          # Messages des threads de travail vers l'interface
 		self.cancel_event = threading.Event()
 		self.worker: Optional[threading.Thread] = None
 		self.current_person: Optional[Person] = None
 		# Références aux images Tk (sinon le ramasse-miettes les supprime et elles disparaissent)
-		self.tree_images: list[ImageTk.PhotoImage] = []
-		self.face_images: list[ImageTk.PhotoImage] = []
+		self.icon_cache: dict[int, ImageTk.PhotoImage] = {}      # Icônes de la liste des personnes, par visage
+		self.face_images: list[ImageTk.PhotoImage] = []          # Vignettes de la page affichée
+		self.face_labels: list[ttk.Label] = []
+		self.sorted_faces: list[FaceRecord] = []                 # Visages de la personne affichée, du plus net au moins net
+		self.page = 0
+		self.grid_columns = 0
 
 		# Variables liées aux widgets
 		self.directory_var = tk.StringVar(value = options.directory or "")
@@ -988,6 +1033,7 @@ class FaceTaggerApp(tk.Tk):
 		self.write_person_var = tk.BooleanVar(value = True)
 		self.write_keywords_var = tk.BooleanVar(value = True)
 		self.backup_var = tk.BooleanVar(value = not options.no_backup)
+		self.page_size_var = tk.StringVar(value = str(options.page_size))
 		self.status_var = tk.StringVar(value = emoji("👋 Choisissez un dossier de photos puis cliquez sur « Analyser »."))
 
 		self.build_widgets()
@@ -997,6 +1043,9 @@ class FaceTaggerApp(tk.Tk):
 		if not self.exiftool.available:
 			self.log("⚠️ ExifTool est introuvable : la lecture et l'écriture des métadonnées sont désactivées.")
 			self.log("👉 Fedora : sudo dnf install perl-Image-ExifTool — Debian/Ubuntu : sudo apt install libimage-exiftool-perl")
+		stats = self.database.statistics()
+		self.log(f"🗄️ Base de données : {self.database.path} ({stats['photos']} photo(s), {stats['faces']} visage(s), "
+				f"{stats['backups']} sauvegarde(s) *_original suivie(s)).")
 
 	# ---------- Construction de la fenêtre ----------
 
@@ -1063,6 +1112,26 @@ class FaceTaggerApp(tk.Tk):
 		panes.add(right, weight = 3)
 		self.person_title = ttk.Label(right, text = "", font = ("TkDefaultFont", 12, "bold"))
 		self.person_title.pack(anchor = "w", padx = 4)
+
+		# Navigation entre les pages : seules les vignettes de la page affichée sont chargées en mémoire
+		navigation = ttk.Frame(right)
+		navigation.pack(fill = "x", padx = 4, pady = 2)
+		self.first_button = ttk.Button(navigation, text = "«", width = 3, command = lambda: self.go_to_page(0))
+		self.previous_button = ttk.Button(navigation, text = "‹", width = 3, command = lambda: self.go_to_page(self.page - 1))
+		self.page_label = ttk.Label(navigation, text = "Page 1 / 1", width = 14, anchor = "center")
+		self.next_button = ttk.Button(navigation, text = "›", width = 3, command = lambda: self.go_to_page(self.page + 1))
+		self.last_button = ttk.Button(navigation, text = "»", width = 3, command = lambda: self.go_to_page(10 ** 9))
+		for widget in (self.first_button, self.previous_button, self.page_label, self.next_button, self.last_button):
+			widget.pack(side = "left", padx = 1)
+		self.range_label = ttk.Label(navigation, text = "")
+		self.range_label.pack(side = "left", padx = 10)
+		self.page_size_box = ttk.Combobox(
+			navigation, textvariable = self.page_size_var, values = ("50", "100", "200", "500"), width = 5, state = "readonly",
+		)
+		self.page_size_box.pack(side = "right")
+		ttk.Label(navigation, text = "Par page :").pack(side = "right", padx = 4)
+		self.page_size_box.bind("<<ComboboxSelected>>", lambda event: self.go_to_page(0))
+
 		ttk.Label(right, text = "Double-clic : ouvrir la photo — clic droit : déplacer ou écarter le visage").pack(anchor = "w", padx = 4)
 		self.canvas = tk.Canvas(right, highlightthickness = 0)
 		canvas_scroll = ttk.Scrollbar(right, orient = "vertical", command = self.canvas.yview)
@@ -1072,7 +1141,7 @@ class FaceTaggerApp(tk.Tk):
 		self.faces_frame = ttk.Frame(self.canvas)
 		self.canvas.create_window((0, 0), window = self.faces_frame, anchor = "nw")
 		self.faces_frame.bind("<Configure>", lambda event: self.canvas.configure(scrollregion = self.canvas.bbox("all")))
-		self.canvas.bind("<Configure>", lambda event: self.show_person(self.current_person))
+		self.canvas.bind("<Configure>", lambda event: self.layout_faces())
 		# Molette de la souris (Windows / macOS : <MouseWheel>, Linux : boutons 4 et 5)
 		self.canvas.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
 		self.canvas.bind("<Button-4>", lambda event: self.canvas.yview_scroll(-1, "units"))
@@ -1088,6 +1157,8 @@ class FaceTaggerApp(tk.Tk):
 		ttk.Checkbutton(bottom, text = "sauvegarde *_original", variable = self.backup_var).pack(side = "left", padx = 12)
 		self.write_button = ttk.Button(bottom, text = "💾 Écrire dans les métadonnées", command = self.start_write)
 		self.write_button.pack(side = "right")
+		self.restore_button = ttk.Button(bottom, text = "♻️ Restaurer les sauvegardes…", command = self.start_restore)
+		self.restore_button.pack(side = "right", padx = 6)
 
 		self.progress = ttk.Progressbar(self, mode = "determinate")
 		self.progress.pack(fill = "x", padx = 6)
@@ -1125,6 +1196,10 @@ class FaceTaggerApp(tk.Tk):
 				elif kind == "library":
 					self.library = event[1]
 					self.refresh_persons()
+				elif kind == "tags":
+					self.library.photo_tags.update(event[1])
+				elif kind == "restored":
+					self.after_restore(event[1])
 				elif kind == "done":
 					self.set_busy(False)
 		except queue.Empty:
@@ -1134,12 +1209,13 @@ class FaceTaggerApp(tk.Tk):
 	def set_busy(self, busy: bool) -> None:
 		"""Active ou désactive les boutons pendant une analyse ou une écriture."""
 		state = "disabled" if busy else "normal"
-		for button in (self.scan_button, self.write_button, self.regroup_button):
+		for button in (self.scan_button, self.write_button, self.regroup_button, self.restore_button):
 			button.configure(state = state)
 		self.stop_button.configure(state = "normal" if busy else "disabled")
 
 	def on_close(self) -> None:
 		self.cancel_event.set()
+		self.database.close()
 		self.destroy()
 
 	# ---------- Analyse des photos (thread de travail) ----------
@@ -1162,8 +1238,19 @@ class FaceTaggerApp(tk.Tk):
 		self.worker = threading.Thread(target = self.scan_worker, args = (directory, threshold, use_keywords), daemon = True)
 		self.worker.start()
 
+	def create_engine(self) -> FaceEngine:
+		"""Charge (et au besoin télécharge) les modèles. N'est appelée que si une photo doit être analysée."""
+		detection_model, recognition_model = ensure_models(
+			self.data_directory / "models", lambda message: self.post("log", message),
+		)
+		return FaceEngine(
+			detection_model, recognition_model, self.options.max_image_size,
+			self.options.min_face_size, self.options.detection_score,
+		)
+
 	def scan_worker(self, directory: str, threshold: float, use_keywords: bool) -> None:
-		"""Détecte les visages, lit les étiquettes existantes puis regroupe (exécuté hors du thread Tk)."""
+		"""Détecte les visages, lit les étiquettes existantes puis regroupe (exécuté hors du thread Tk).
+		Ce qui est déjà en base pour une photo inchangée n'est ni ré-analysé ni relu."""
 		try:
 			self.post("log", f"📂 Exploration de {directory}…")
 			photos = list_photos(directory)
@@ -1172,55 +1259,68 @@ class FaceTaggerApp(tk.Tk):
 				return
 			self.post("log", f"🖼️ {len(photos)} photos trouvées.")
 
-			detection_model, recognition_model = ensure_models(
-				self.data_directory / "models", lambda message: self.post("log", message),
-			)
-			engine = FaceEngine(
-				detection_model, recognition_model, self.options.max_image_size,
-				self.options.min_face_size, self.options.detection_score,
-			)
-			# Le cache évite de ré-analyser les photos inchangées (même taille et même date)
-			signature = (self.options.max_image_size, self.options.min_face_size, self.options.detection_score)
-			cache_path = self.data_directory / "faces_cache.pkl"
-			cache = load_cache(cache_path, signature)
+			# Si les paramètres de détection ont changé, les visages mémorisés ne sont plus valables
+			signature = f"{self.options.max_image_size}|{self.options.min_face_size}|{self.options.detection_score}"
+			if self.database.reset_analysis_if_needed(signature):
+				self.post("log", "🗄️ Paramètres de détection modifiés : les photos seront ré-analysées.")
+			known = self.database.signatures()
 
-			library = Library()
-			failures = 0
+			engine: Optional[FaceEngine] = None
+			processed: set[str] = set()
+			analysed = reused = failures = 0
 			for index, photo in enumerate(photos, start = 1):
 				if self.cancel_event.is_set():
 					self.post("log", "⏹️ Analyse interrompue : les photos déjà traitées sont conservées.")
 					break
 				self.post("progress", index, len(photos), f"🔍 Analyse {index}/{len(photos)} — {os.path.basename(photo)}")
-				stat = os.stat(photo)
-				cached = cache.get(photo)
-				if cached and cached["mtime"] == stat.st_mtime_ns and cached["size"] == stat.st_size:
-					found = cached["faces"]
+				try:
+					stat = os.stat(photo)
+				except OSError as error:
+					failures += 1
+					self.post("log", f"⚠️ Photo inaccessible ({os.path.basename(photo)}) : {error}")
+					continue
+				previous = known.get(photo)
+				if previous and previous[0] == stat.st_mtime_ns and previous[1] == stat.st_size and previous[2]:
+					reused += 1                          # Photo inchangée déjà analysée : on réutilise la base
 				else:
+					if engine is None:
+						engine = self.create_engine()    # Une erreur ici (modèles absents) arrête toute l'analyse
 					try:
 						found = engine.analyse(photo)
 					except Exception as error:
 						failures += 1
 						self.post("log", f"⚠️ Photo ignorée ({os.path.basename(photo)}) : {error}")
 						continue
-					cache[photo] = {"mtime": stat.st_mtime_ns, "size": stat.st_size, "faces": found}
-				for item in found:
-					library.faces.append(FaceRecord(
-						photo = photo, box = item["box"], score = item["score"],
-						embedding = item["embedding"], thumbnail = item["thumbnail"],
-					))
-			try:
-				save_cache(cache_path, signature, cache)
-			except Exception as error:
-				self.post("log", f"⚠️ Cache non enregistré : {error}")
-			self.post("log", f"✅ {len(library.faces)} visages détectés ({failures} photo(s) en échec).")
+					self.database.store_analysis(photo, stat.st_mtime_ns, stat.st_size, found)
+					analysed += 1
+				processed.add(photo)
+			self.post("log", f"🗄️ {reused} photo(s) reprise(s) depuis la base, {analysed} analysée(s), {failures} en échec.")
 
-			# Lecture des étiquettes déjà présentes, uniquement pour les photos contenant des visages
+			# Les visages viennent de la base (sans les vignettes, lues plus tard à la demande)
+			library = Library()
+			for face_id, photo, x, y, width, height, score, blob in self.database.load_faces(processed):
+				library.faces.append(FaceRecord(
+					photo = photo, box = (x, y, width, height), score = score,
+					embedding = np.frombuffer(blob, dtype = np.float32), face_id = face_id,
+				))
+			self.post("log", f"✅ {len(library.faces)} visages au total.")
+
+			# Étiquettes déjà présentes : d'abord depuis la base, ExifTool ne lit que les photos manquantes
 			if self.exiftool.available and library.faces:
-				self.post("progress", 0, 1, "🏷️ Lecture des étiquettes existantes (ExifTool)…")
 				with_faces = sorted({face.photo for face in library.faces})
-				entries = self.exiftool.read_tags(with_faces)
+				stored = self.database.tags(with_faces)
+				missing = [photo for photo in with_faces if photo not in stored]
+				self.post("log", f"🗄️ Étiquettes : {len(stored)} reprises depuis la base, {len(missing)} à lire avec ExifTool.")
+				if missing:
+					entries = self.exiftool.read_tags(
+						missing, lambda done, total: self.post("progress", done, total, f"🏷️ Lecture des étiquettes {done}/{total}…"),
+					)
+					# On ne mémorise que les photos réellement lues : les autres seront retentées au prochain passage
+					fresh = {photo: entries[path_key(photo)] for photo in missing if path_key(photo) in entries}
+					self.database.store_tags(fresh)
+					stored.update(fresh)
 				for photo in with_faces:
-					library.photo_tags[photo] = parse_photo_tags(entries.get(path_key(photo), {}))
+					library.photo_tags[photo] = parse_photo_tags(stored.get(photo, {}))
 				unmatched = library.label_faces()
 				labeled = sum(1 for face in library.faces if face.label)
 				self.post("log", f"🏷️ {labeled} visage(s) rattaché(s) à un nom déjà présent dans les photos.")
@@ -1256,12 +1356,19 @@ class FaceTaggerApp(tk.Tk):
 		if select is None:
 			select = [int(i) for i in self.tree.selection()]
 		self.tree.delete(*self.tree.get_children())
-		self.tree_images.clear()
+		if len(self.icon_cache) > ICON_CACHE_SIZE:
+			self.icon_cache.clear()                  # Évite une croissance sans limite de la mémoire
 		persons = sorted(self.library.persons.values(), key = lambda p: (p.name is None, (p.name or "").casefold(), -len(p.faces)))
+		# Une icône par personne : son visage le plus net. Les vignettes manquantes sont lues par lots.
+		bests = {person.identifier: max(person.faces, key = lambda f: f.score) for person in persons}
+		thumbnails = self.database.thumbnails([face.face_id for face in bests.values() if face.face_id not in self.icon_cache])
 		for person in persons:
-			best = max(person.faces, key = lambda f: f.score)
-			icon = ImageTk.PhotoImage(best.thumbnail.resize((TREE_ROW_HEIGHT - 4, TREE_ROW_HEIGHT - 4)))
-			self.tree_images.append(icon)
+			best = bests[person.identifier]
+			icon = self.icon_cache.get(best.face_id)
+			if icon is None:
+				size = TREE_ROW_HEIGHT - 4
+				icon = ImageTk.PhotoImage(decode_thumbnail(thumbnails.get(best.face_id)).resize((size, size)))
+				self.icon_cache[best.face_id] = icon
 			label = emoji(("🙈 " if person.ignored else "") + (person.name or f"❓ Inconnu n°{person.identifier}"))
 			origin = {"tag": "🏷️ étiquette", "manual": "✍️ saisi"}.get(person.source, "")
 			self.tree.insert(
@@ -1281,39 +1388,88 @@ class FaceTaggerApp(tk.Tk):
 
 	def on_select(self, event: Optional[tk.Event] = None) -> None:
 		selected = self.selected_persons()
-		self.show_person(selected[0] if len(selected) == 1 else None)
+		# La page courante est conservée tant que la personne affichée ne change pas
+		self.show_person(selected[0] if len(selected) == 1 else None, keep_page = True)
 		if len(selected) > 1:
 			self.person_title.configure(text = emoji(f"👥 {len(selected)} personnes sélectionnées"))
 
-	def show_person(self, person: Optional[Person]) -> None:
-		"""Affiche les vignettes des visages d'une personne dans le panneau de droite."""
+	def page_size(self) -> int:
+		"""Nombre de vignettes par page (réglable dans l'interface)."""
+		try:
+			return max(10, int(self.page_size_var.get()))
+		except (ValueError, tk.TclError):
+			return 100
+
+	def show_person(self, person: Optional[Person], keep_page: bool = False) -> None:
+		"""Affiche une personne : ses visages sont triés du plus net au moins net, puis découpés en pages."""
+		changed = person is not self.current_person
 		self.current_person = person
+		self.sorted_faces = sorted(person.faces, key = lambda f: -f.score) if person is not None else []
+		if changed or not keep_page:
+			self.page = 0
+		self.render_page()
+
+	def go_to_page(self, page: int) -> None:
+		"""Affiche la page demandée (ramenée dans les limites existantes)."""
+		self.page = page
+		self.render_page()
+
+	def render_page(self) -> None:
+		"""Construit les vignettes de la page courante. Les images des autres pages sont libérées :
+		la mémoire utilisée dépend de la taille de la page, pas du nombre de visages de la personne."""
 		for child in self.faces_frame.winfo_children():
 			child.destroy()
 		self.face_images.clear()
+		self.face_labels.clear()
+		person = self.current_person
 		if person is None:
 			self.person_title.configure(text = "")
+			self.page_label.configure(text = "Page – / –")
+			self.range_label.configure(text = "")
+			for button in (self.first_button, self.previous_button, self.next_button, self.last_button):
+				button.configure(state = "disabled")
 			return
+
+		size = self.page_size()
+		total = len(self.sorted_faces)
+		pages = max(1, math.ceil(total / size))
+		self.page = min(max(self.page, 0), pages - 1)
+		chunk = self.sorted_faces[self.page * size:(self.page + 1) * size]
+
 		self.person_title.configure(text = emoji(
-			f"{'🙈 ' if person.ignored else '👤 '}{person.display_name} — "
-			f"{len(person.faces)} visage(s), {len(person.photos)} photo(s)"
+			f"{'🙈 ' if person.ignored else '👤 '}{person.display_name} — {total} visage(s), {len(person.photos)} photo(s)"
 		))
-		faces = sorted(person.faces, key = lambda f: -f.score)[:MAX_FACES_SHOWN]
-		columns = max(1, self.canvas.winfo_width() // (THUMBNAIL_SIZE + 24))
-		for position, face in enumerate(faces):
-			image = ImageTk.PhotoImage(face.thumbnail)
+		self.page_label.configure(text = f"Page {self.page + 1} / {pages}")
+		self.range_label.configure(text = f"{self.page * size + 1 if chunk else 0}–{self.page * size + len(chunk)} sur {total}")
+		for button in (self.first_button, self.previous_button):
+			button.configure(state = "normal" if self.page > 0 else "disabled")
+		for button in (self.next_button, self.last_button):
+			button.configure(state = "normal" if self.page < pages - 1 else "disabled")
+
+		# Les vignettes de la page sont lues dans la base en une seule requête
+		thumbnails = self.database.thumbnails([face.face_id for face in chunk])
+		for face in chunk:
+			image = ImageTk.PhotoImage(decode_thumbnail(thumbnails.get(face.face_id)))
 			self.face_images.append(image)
 			label = ttk.Label(self.faces_frame, image = image, text = os.path.basename(face.photo)[:16], compound = "top")
-			label.grid(row = position // columns, column = position % columns, padx = 4, pady = 4)
 			label.bind("<Double-Button-1>", lambda event, f = face: self.open_photo(f))
 			label.bind("<Button-3>", lambda event, f = face: self.face_menu(event, f))
 			label.bind("<Button-2>", lambda event, f = face: self.face_menu(event, f))   # Clic droit sous macOS
 			label.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
 			label.bind("<Button-4>", lambda event: self.canvas.yview_scroll(-1, "units"))
 			label.bind("<Button-5>", lambda event: self.canvas.yview_scroll(1, "units"))
-		if len(person.faces) > MAX_FACES_SHOWN:
-			ttk.Label(self.faces_frame, text = f"… et {len(person.faces) - MAX_FACES_SHOWN} autre(s) visage(s) non affiché(s)").grid(
-				row = len(faces) // columns + 1, column = 0, columnspan = columns, pady = 6)
+			self.face_labels.append(label)
+		self.layout_faces(force = True)
+		self.canvas.yview_moveto(0)
+
+	def layout_faces(self, force: bool = False) -> None:
+		"""Place les vignettes en grille. N'est refaite que si le nombre de colonnes change."""
+		columns = max(1, self.canvas.winfo_width() // (THUMBNAIL_SIZE + 24))
+		if columns == self.grid_columns and not force:
+			return
+		self.grid_columns = columns
+		for position, label in enumerate(self.face_labels):
+			label.grid(row = position // columns, column = position % columns, padx = 4, pady = 4)
 
 	# ---------- Actions sur les personnes et les visages ----------
 
@@ -1349,7 +1505,7 @@ class FaceTaggerApp(tk.Tk):
 		for person in self.selected_persons():
 			person.ignored = not person.ignored
 		self.refresh_persons()
-		self.show_person(self.current_person)
+		self.show_person(self.current_person, keep_page = True)
 
 	def name_unknowns(self) -> None:
 		if not any(not p.name and not p.ignored for p in self.library.persons.values()):
@@ -1423,45 +1579,144 @@ class FaceTaggerApp(tk.Tk):
 		self.worker.start()
 
 	def write_worker(self, updates: dict[str, list[tuple[str, FaceRecord]]], write_options: tuple) -> None:
-		"""Prépare les enregistrements puis appelle ExifTool par lots (exécuté hors du thread Tk)."""
+		"""Écrit les métadonnées par lots (exécuté hors du thread Tk). Après chaque lot, les étiquettes sont
+		relues pour vérifier l'écriture, puis la base est mise à jour (signature, étiquettes, historique)."""
 		write_regions, write_person, write_keywords, backup = write_options
+		fields = [label for flag, label in ((write_regions, "regions"), (write_person, "PersonInImage"), (write_keywords, "keywords")) if flag]
 		try:
-			records: list[dict] = []
-			for photo, items in updates.items():
-				tags = self.library.photo_tags.get(photo, PhotoTags())
-				names = merge_unique([name for name, _ in items])
-				record: dict = {"SourceFile": Path(photo).as_posix()}
-				if write_person:
-					record["XMP-iptcExt:PersonInImage"] = merge_unique(tags.person_in_image, names)
-				if write_keywords:
-					# XMP est en UTF-8 par norme. L'IPTC n'est volontairement pas modifié : son jeu de caractères
-					# n'est pas toujours déclaré et une écriture risquerait de corrompre les accents existants.
-					record["XMP-dc:Subject"] = merge_unique(tags.subject, names)
-					record["XPKeywords"] = ";".join(merge_unique(tags.xp_keywords, names))
-				if write_regions:
-					record["XMP-mwg-rs:RegionInfo"] = build_region_info(tags, items)
-				records.append(record)
-
-			self.post("log", f"💾 Écriture des métadonnées de {len(records)} photo(s)…")
-			problems = 0
-			for start in range(0, len(records), EXIFTOOL_BATCH):
+			photos = list(updates)
+			self.post("log", f"💾 Écriture des métadonnées de {len(photos)} photo(s)…")
+			problems = verified_count = backups_count = 0
+			for start in range(0, len(photos), EXIFTOOL_BATCH):
 				if self.cancel_event.is_set():
 					self.post("log", "⏹️ Écriture interrompue.")
 					break
-				batch = records[start:start + EXIFTOOL_BATCH]
-				self.post("progress", start, len(records), f"💾 Écriture {start}/{len(records)}…")
-				for message in self.exiftool.write_tags(batch, backup):
+				batch = photos[start:start + EXIFTOOL_BATCH]
+				self.post("progress", start, len(photos), f"💾 Écriture {start}/{len(photos)}…")
+
+				# 1. Un enregistrement par photo (fusion avec les étiquettes déjà présentes)
+				records: list[dict] = []
+				for photo in batch:
+					tags = self.library.photo_tags.get(photo, PhotoTags())
+					names = merge_unique([name for name, _ in updates[photo]])
+					record: dict = {"SourceFile": Path(photo).as_posix()}
+					# Régions d'abord : elles indiquent quels anciens noms sont remplacés (personne renommée)
+					replacements: dict[str, str] = {}
+					if write_regions:
+						record["XMP-mwg-rs:RegionInfo"], replacements = build_region_info(tags, updates[photo])
+						for old, new in replacements.items():
+							self.post("log", f"✏️ {os.path.basename(photo)} : « {old} » remplacé par « {new} »")
+					# Les anciens noms remplacés sont retirés des listes (sauf s'ils sont aussi voulus ailleurs)
+					removed = {name_key(old) for old in replacements} - {name_key(name) for name in names}
+
+					def kept(existing: list[str]) -> list[str]:
+						return [name for name in existing if name_key(name) not in removed]
+
+					if write_person:
+						record["XMP-iptcExt:PersonInImage"] = merge_unique(kept(tags.person_in_image), names)
+					if write_keywords:
+						# XMP est en UTF-8 par norme. L'IPTC n'est volontairement pas modifié : son jeu de caractères
+						# n'est pas toujours déclaré et une écriture risquerait de corrompre les accents existants.
+						record["XMP-dc:Subject"] = merge_unique(kept(tags.subject), names)
+						record["XPKeywords"] = ";".join(merge_unique(kept(tags.xp_keywords), names))
+					records.append(record)
+
+				# 2. Écriture par ExifTool (la 1re version de chaque photo est conservée dans *_original)
+				for message in self.exiftool.write_tags(records, backup):
 					if "updated" in message or "unchanged" in message:
 						self.post("log", f"✅ {message}")
 					else:
 						problems += 1
 						self.post("log", f"⚠️ {message}")
-			self.post("progress", len(records), len(records), f"✅ Écriture terminée ({problems} avertissement(s)).")
-			self.post("log", f"🎉 Terminé : {len(records)} photo(s) traitée(s), {problems} avertissement(s).")
+
+				# 3. Relecture : vérification des noms, puis mise à jour de la base
+				entries = self.exiftool.read_tags(batch)
+				fresh: dict[str, dict] = {}
+				new_tags: dict[str, PhotoTags] = {}
+				for photo in batch:
+					entry = entries.get(path_key(photo))
+					if entry is None:
+						problems += 1
+						self.post("log", f"⚠️ Relecture impossible : {os.path.basename(photo)}")
+						continue
+					names = merge_unique([name for name, _ in updates[photo]])
+					tags = parse_photo_tags(entry)
+					if check_written(tags, names, write_regions, write_person, write_keywords):
+						verified = True
+						verified_count += 1
+					else:
+						verified = False
+						problems += 1
+						self.post("log", f"⚠️ Noms attendus absents après écriture : {os.path.basename(photo)} (conflit avec une étiquette existante ?)")
+					try:
+						# La taille du fichier a changé mais pas ses pixels : on met la signature à jour
+						# et les visages mémorisés restent valables.
+						stat = os.stat(photo)
+						self.database.update_signature(photo, stat.st_mtime_ns, stat.st_size)
+					except OSError:
+						pass
+					backup_path = photo + restore_originals.BACKUP_SUFFIX
+					has_backup = os.path.exists(backup_path)
+					backups_count += int(has_backup)
+					self.database.record_modification(photo, names, fields, verified, backup_path if has_backup else None)
+					fresh[photo] = entry
+					new_tags[photo] = tags
+				self.database.store_tags(fresh)
+				self.post("tags", new_tags)
+
+			self.post("progress", len(photos), len(photos), f"✅ Écriture terminée ({problems} avertissement(s)).")
+			self.post("log", f"🎉 Terminé : {verified_count}/{len(photos)} photo(s) vérifiée(s) après relecture, {problems} avertissement(s).")
+			if backups_count:
+				self.post("log", f"📦 {backups_count} sauvegarde(s) *_original disponible(s) — bouton « Restaurer les sauvegardes » ou restore_originals.py.")
 		except Exception as error:
 			self.post("log", f"❌ Erreur pendant l'écriture : {error}")
 		finally:
 			self.post("done")
+
+	# ---------- Restauration des sauvegardes *_original ----------
+
+	def start_restore(self) -> None:
+		"""Restaure d'un coup toutes les photos d'un dossier à partir de leurs sauvegardes *_original."""
+		directory = filedialog.askdirectory(
+			initialdir = self.directory_var.get() or str(Path.home()), title = "Dossier contenant les fichiers *_original",
+		)
+		if not directory:
+			return
+		backups = restore_originals.find_backups(os.path.abspath(directory))
+		if not backups:
+			messagebox.showinfo(emoji("ℹ️ Restauration"), "Aucune sauvegarde *_original trouvée dans ce dossier.")
+			return
+		if not messagebox.askyesno(
+			emoji("♻️ Restauration"),
+			emoji(f"Remplacer {len(backups)} photo(s) par leur version d'origine ?\n"
+				"Les noms écrits dans leurs métadonnées seront perdus, et la liste des personnes sera vidée "
+				"si elle contient ces photos (relancez ensuite « Analyser »)."),
+		):
+			return
+		self.set_busy(True)
+		self.worker = threading.Thread(target = self.restore_worker, args = (backups,), daemon = True)
+		self.worker.start()
+
+	def restore_worker(self, backups: list[tuple[str, str]]) -> None:
+		"""Restaure les photos puis met la base à jour (exécuté hors du thread Tk)."""
+		try:
+			self.post("log", f"♻️ Restauration de {len(backups)} photo(s)…")
+			done, failed = restore_originals.restore_backups(
+				backups, database = self.database, log = lambda message: self.post("log", message),
+			)
+			self.post("log", f"🎉 Terminé : {done} photo(s) restaurée(s), {failed} échec(s).")
+			self.post("restored", {target for _, target in backups})
+		except Exception as error:
+			self.post("log", f"❌ Erreur pendant la restauration : {error}")
+		finally:
+			self.post("done")
+
+	def after_restore(self, targets: set[str]) -> None:
+		"""Les étiquettes en mémoire ne correspondent plus aux fichiers restaurés : on repart d'une liste vide."""
+		if targets & {face.photo for face in self.library.faces}:
+			self.library = Library()
+			self.refresh_persons()
+			self.log("🔄 Liste des personnes vidée : relancez « Analyser » (rapide : seules les étiquettes des photos restaurées sont relues).")
 
 
 # ======================================================================================
@@ -1472,6 +1727,8 @@ def parse_arguments() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description = "👥 Regroupe les visages d'un dossier de photos par personne et écrit les noms dans les métadonnées.")
 	parser.add_argument("--directory", default = "", help = "📁 Dossier de photos à ouvrir au démarrage")
 	parser.add_argument("--data-directory", default = str(Path.home() / ".face_tagger"), help = "🗄️ Dossier des modèles ONNX et du cache")
+	parser.add_argument("--database", default = "", help = "🗄️ Fichier de la base SQLite (défaut : <data-directory>/face_tagger.sqlite)")
+	parser.add_argument("--page-size", type = int, default = 100, help = "📄 Nombre de vignettes affichées par page (défaut 100)")
 	parser.add_argument("--exiftool", default = "exiftool", help = "🔧 Chemin ou nom de l'exécutable ExifTool")
 	parser.add_argument("--threshold", type = float, default = 0.40, help = "🎚️ Seuil de similarité cosinus (0.20 à 0.70, défaut 0.40)")
 	parser.add_argument("--max-image-size", type = int, default = 2000, help = "📐 Taille maximale (pixels) des photos pour la détection")
@@ -1490,6 +1747,8 @@ def main() -> None:
 		if hasattr(stream, "reconfigure"):
 			stream.reconfigure(encoding = "utf-8", errors = "replace")
 	options.threshold = min(max(options.threshold, 0.20), 0.70)
+	if not options.database:
+		options.database = str(Path(options.data_directory).expanduser() / "face_tagger.sqlite")
 	app = FaceTaggerApp(options)
 	app.mainloop()
 

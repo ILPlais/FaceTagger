@@ -19,6 +19,7 @@ les noms dans les métadonnées des photos.
 	8. Les visages d'une personne sont affichés page par page (seules les vignettes de la page
 		courante sont chargées en mémoire).
 	9. Les sauvegardes *_original d'ExifTool se restaurent d'un coup (bouton, ou restore_originals.py).
+	10. L'interface suit le mode sombre de Windows (ou --theme) et reste nette sur les écrans à haute résolution.
 
 Fichiers à placer dans le même dossier : face_tagger.py, face_database.py, restore_originals.py
 
@@ -52,8 +53,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 from typing import Callable, Optional
+
+if sys.platform == "win32":
+	import winreg       # Lecture du thème de Windows (clair ou sombre)
 
 try:
 	import cv2
@@ -105,8 +108,26 @@ EXIFTOOL_BATCH = 25          # Nombre de photos modifiées par appel à ExifTool
 # Identifiant de l'application pour la barre des tâches de Windows (voir set_windows_app_id)
 APP_USER_MODEL_ID = "ILPlais.FaceTagger"
 
-# Réglages globaux modifiables par la ligne de commande
-SETTINGS = {"emoji": True}
+# Couleurs du thème sombre (proches de celles de Windows 11)
+DARK_COLORS = {
+	"background": "#202020",        # Fond des fenêtres
+	"surface": "#2b2b2b",           # Champs de saisie, listes et journal
+	"button": "#333333",            # Boutons, en-têtes de colonnes, ascenseurs
+	"hover": "#3e3e3e",             # Élément survolé
+	"pressed": "#4a4a4a",           # Bouton enfoncé
+	"thumb": "#6b6b6b",             # Curseur du seuil et ascenseurs, plus clairs pour se détacher de leur glissière
+	"thumb_hover": "#858585",
+	"thumb_pressed": "#9e9e9e",
+	"border": "#4a4a4a",            # Bordures
+	"text": "#f0f0f0",              # Texte
+	"disabled": "#7a7a7a",          # Texte des éléments désactivés
+	"selection": "#0067c0",         # Fond de la sélection (bleu de Windows)
+	"selection_text": "#ffffff",    # Texte sélectionné
+	"accent": "#4cc2ff",            # Barre de progression
+}
+
+# Réglages globaux : emojis et thème viennent de la ligne de commande, l'échelle de l'écran est mesurée au démarrage
+SETTINGS = {"emoji": True, "dark": False, "scale": 1.0}
 
 # Caractères considérés comme des emojis (utile pour l'option --no-emoji)
 EMOJI_PATTERN = re.compile("[\U0001F000-\U0001FFFF\u2190-\u21FF\u23E9-\u23FF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
@@ -160,6 +181,40 @@ def set_windows_app_id() -> None:
 	except (AttributeError, OSError):
 		# Fonction absente ou appel refusé : seule l'icône de la barre des tâches est en jeu, on continue
 		pass
+
+
+def enable_dpi_awareness() -> None:
+	"""Déclare à Windows que l'application gère elle-même les écrans à haute résolution (125 %, 150 %…).
+
+	Sans cette déclaration, Windows dessine la fenêtre en 96 ppp puis l'agrandit comme une image : textes et
+	vignettes sont flous. Une fois déclarée, Tk mesure la vraie résolution et agrandit seul les polices ; les
+	tailles exprimées en pixels sont agrandies par scaled(). Le mode « système » est préféré au mode « par écran » :
+	Tk ne sait pas se redimensionner quand la fenêtre passe sur un écran d'une autre résolution, c'est alors
+	Windows qui s'en charge. Doit être appelée avant la création de la première fenêtre.
+	"""
+	if sys.platform != "win32":
+		return
+	try:
+		# PROCESS_SYSTEM_DPI_AWARE (Windows 8.1 et suivants). Un refus (déjà déclaré par le manifeste de
+		# l'exécutable) est renvoyé comme code d'erreur, sans exception : il est sans conséquence.
+		ctypes.windll.shcore.SetProcessDpiAwareness(1)
+	except (AttributeError, OSError):
+		try:
+			ctypes.windll.user32.SetProcessDPIAware()       # Windows Vista à 8
+		except (AttributeError, OSError):
+			pass
+
+
+def windows_prefers_dark() -> bool:
+	"""Indique si Windows est réglé en mode sombre pour les applications (Paramètres > Personnalisation > Couleurs)."""
+	if sys.platform != "win32":
+		return False
+	try:
+		with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+			return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+	except OSError:
+		# Valeur absente (Windows antérieur à 10) : thème clair
+		return False
 
 
 def strip_widget_emoji(widget: tk.Misc) -> None:
@@ -843,6 +898,151 @@ def check_written(tags: PhotoTags, names: list[str], regions: bool, person: bool
 # Interface graphique
 # ======================================================================================
 
+def screen_scale(window: tk.Misc) -> float:
+	"""Facteur d'agrandissement de l'écran : 1.0 à 96 ppp (100 %), 1.25 à 120 ppp (125 %), 2.0 à 200 %…
+
+	Jamais inférieur à 1 : macOS annonce 72 ppp (la haute résolution Retina y est gérée par le système), ce qui
+	rapetisserait l'interface au lieu de l'adapter.
+	"""
+	return max(1.0, round(window.winfo_fpixels("1i") / 96, 2))
+
+
+def scaled(pixels: int) -> int:
+	"""Convertit une taille prévue pour un écran à 100 % en pixels réels, selon l'échelle de l'écran."""
+	return round(pixels * SETTINGS["scale"])
+
+
+def work_area(window: tk.Misc) -> tuple[int, int, int, int]:
+	"""Zone utile de l'écran principal, barre des tâches exclue : (gauche, haut, largeur, hauteur) en pixels.
+	Ailleurs que sous Windows, l'écran entier (le gestionnaire de fenêtres y replace lui-même les fenêtres)."""
+	if sys.platform == "win32":
+		rect = (ctypes.c_long * 4)()        # Structure RECT : gauche, haut, droite, bas
+		try:
+			if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):   # SPI_GETWORKAREA
+				return rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]
+		except (AttributeError, OSError):
+			pass
+	return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
+
+
+def thumbnail_photo(data: Optional[bytes], size: int = THUMBNAIL_SIZE) -> ImageTk.PhotoImage:
+	"""Image Tk d'une vignette de la base, à la taille voulue agrandie selon l'échelle de l'écran.
+
+	Les vignettes restent stockées en 96 pixels : les régénérer plus grandes obligerait à ré-analyser toute la
+	photothèque, pour un gain de netteté minime.
+	"""
+	image = decode_thumbnail(data)
+	display_size = scaled(size)
+	if image.size != (display_size, display_size):
+		image = image.resize((display_size, display_size), Image.Resampling.LANCZOS)
+	return ImageTk.PhotoImage(image)
+
+
+def set_title_bar_theme(window: tk.Misc) -> None:
+	"""Assombrit la barre de titre d'une fenêtre en mode sombre (Windows 10 version 2004 et suivantes, Windows 11).
+
+	La barre de titre est dessinée par Windows et non par Tk : c'est l'attribut DWM « mode sombre immersif » de la
+	fenêtre qui la passe en sombre. La fenêtre doit déjà exister côté Windows, d'où update_idletasks().
+	"""
+	if sys.platform != "win32" or not SETTINGS["dark"]:
+		return
+	try:
+		window.update_idletasks()
+		# winfo_id() désigne l'intérieur de la fenêtre ; la barre de titre appartient au cadre qui l'entoure
+		handle = ctypes.windll.user32.GetParent(window.winfo_id())
+		value = ctypes.c_int(1)
+		# DWMWA_USE_IMMERSIVE_DARK_MODE vaut 20, mais 19 dans les versions de Windows 10 antérieures à 2004
+		for attribute in (20, 19):
+			if ctypes.windll.dwmapi.DwmSetWindowAttribute(handle, attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+				break
+	except (AttributeError, OSError):
+		pass
+
+
+def apply_dark_theme(root: tk.Tk) -> None:
+	"""Applique le thème sombre à toute l'application.
+
+	Les thèmes ttk natifs de Windows (« vista », « winnative ») dessinent les widgets avec les styles visuels du
+	système, toujours clairs : leurs couleurs ne se règlent pas. Le thème « clam », dessiné par Tk lui-même, accepte
+	toutes les couleurs. Les widgets Tk classiques (canevas, texte, menus, fenêtres de dialogue) prennent les leurs
+	dans la base d'options, qui ne vaut que pour les widgets créés ensuite : à appeler avant de construire l'interface.
+	"""
+	colors = DARK_COLORS
+	style = ttk.Style(root)
+	style.theme_use("clam")
+	# Réglages hérités par tous les widgets ttk. Dans « clam », lightcolor et darkcolor sont les deux teintes du
+	# relief des bordures : identiques au fond, elles donnent un rendu plat, comme sous Windows 11.
+	style.configure(
+		".", background = colors["background"], foreground = colors["text"], fieldbackground = colors["surface"],
+		bordercolor = colors["border"], lightcolor = colors["background"], darkcolor = colors["background"],
+		troughcolor = colors["surface"], selectbackground = colors["selection"], selectforeground = colors["selection_text"],
+		insertcolor = colors["text"], arrowcolor = colors["text"], focuscolor = colors["accent"],
+	)
+	style.map(".", background = [("disabled", colors["background"])], foreground = [("disabled", colors["disabled"])])
+	# Éléments cliquables : plus clairs au survol, plus encore à l'appui. Les teintes du thème « clam » pour ces
+	# états sont claires et doivent toutes être remplacées.
+	for name, normal, hover, pressed in (
+		("TButton", colors["button"], colors["hover"], colors["pressed"]),
+		("Treeview.Heading", colors["button"], colors["hover"], colors["pressed"]),
+		("TScrollbar", colors["thumb"], colors["thumb_hover"], colors["thumb_pressed"]),
+		("TScale", colors["thumb"], colors["thumb_hover"], colors["thumb_pressed"]),
+	):
+		style.configure(name, background = normal, lightcolor = normal, darkcolor = normal)
+		style.map(
+			name,
+			background = [("disabled", colors["background"]), ("pressed", pressed), ("active", hover)],
+			lightcolor = [("pressed", pressed), ("active", hover)],
+			darkcolor = [("pressed", pressed), ("active", hover)],
+		)
+	style.configure("TScrollbar", troughcolor = colors["background"], bordercolor = colors["background"])
+	style.configure("TCheckbutton", indicatorbackground = colors["surface"], indicatorforeground = colors["text"])
+	style.map(
+		"TCheckbutton",
+		background = [("active", colors["background"])],
+		indicatorbackground = [("pressed", colors["pressed"]), ("selected", colors["selection"])],
+		indicatorforeground = [("selected", colors["selection_text"])],
+	)
+	# Liste déroulante en lecture seule : « clam » la colorie entièrement quand elle a le focus
+	style.configure("TCombobox", background = colors["button"])
+	style.map(
+		"TCombobox",
+		fieldbackground = [("readonly", colors["surface"])],
+		background = [("active", colors["hover"])],
+		foreground = [("disabled", colors["disabled"])],
+	)
+	style.configure("Treeview", background = colors["surface"], foreground = colors["text"])
+	style.map("Treeview", background = [("selected", colors["selection"])], foreground = [("selected", colors["selection_text"])])
+	style.configure(
+		"TProgressbar", background = colors["accent"], lightcolor = colors["accent"], darkcolor = colors["accent"],
+		bordercolor = colors["border"],
+	)
+
+	# Widgets Tk classiques, par la base d'options
+	root.configure(background = colors["background"])
+	for pattern, value in (
+		("*Toplevel.background", colors["background"]),                 # Fenêtres de dialogue
+		("*Canvas.background", colors["background"]),                   # Zone des vignettes
+		("*Text.background", colors["surface"]),                        # Journal
+		("*Text.foreground", colors["text"]),
+		("*Text.insertBackground", colors["text"]),
+		("*Text.selectBackground", colors["selection"]),
+		("*Text.selectForeground", colors["selection_text"]),
+		("*Text.relief", "flat"),
+		("*Text.highlightThickness", 1),
+		("*Text.highlightBackground", colors["border"]),
+		("*Text.highlightColor", colors["border"]),
+		("*Menu.background", colors["surface"]),                        # Menu contextuel des visages
+		("*Menu.foreground", colors["text"]),
+		("*Menu.activeBackground", colors["selection"]),
+		("*Menu.activeForeground", colors["selection_text"]),
+		("*TCombobox*Listbox.background", colors["surface"]),           # Liste ouverte d'une Combobox
+		("*TCombobox*Listbox.foreground", colors["text"]),
+		("*TCombobox*Listbox.selectBackground", colors["selection"]),
+		("*TCombobox*Listbox.selectForeground", colors["selection_text"]),
+	):
+		root.option_add(pattern, value)
+
+
 class NameDialog(tk.Toplevel):
 	"""Boîte de saisie d'un nom, avec liste déroulante des noms déjà connus."""
 
@@ -867,6 +1067,7 @@ class NameDialog(tk.Toplevel):
 		self.bind("<Return>", lambda event: self.accept())
 		self.bind("<Escape>", lambda event: self.destroy())
 		strip_widget_emoji(self)
+		set_title_bar_theme(self)
 		self.grab_set()
 		self.combobox.focus_set()
 		self.wait_window(self)
@@ -897,16 +1098,18 @@ class PhotoViewer(tk.Toplevel):
 			messagebox.showerror(emoji("❌ Erreur"), f"Impossible d'ouvrir la photo :\n{error}", parent = master)
 			self.destroy()
 			return
-		image.thumbnail((1100, 780))
+		# Taille prévue pour un écran à 100 %, agrandie selon l'échelle de l'écran sans dépasser sa zone utile
+		_, _, area_width, area_height = work_area(self)
+		image.thumbnail((min(scaled(1100), area_width - scaled(40)), min(scaled(780), area_height - scaled(80))))
 		draw = ImageDraw.Draw(image)
-		font = load_font(max(12, image.width // 55))
+		font = load_font(max(scaled(12), image.width // 55))
 		for other in library.faces_of_photo(face.photo):
 			x, y, width, height = other.box
 			left, top = x * image.width, y * image.height
 			right, bottom = (x + width) * image.width, (y + height) * image.height
 			# Rouge pour le visage sélectionné, vert pour les autres
 			color = "#ff3b30" if other is face else "#34c759"
-			draw.rectangle([left, top, right, bottom], outline = color, width = 3)
+			draw.rectangle([left, top, right, bottom], outline = color, width = scaled(3))
 			# Le nom est écrit sur un fond plein pour rester lisible sur les images chargées
 			caption = other.person.display_name if other.person else "?"
 			text_box = draw.textbbox((left, bottom + 2), caption, font = font)
@@ -915,6 +1118,7 @@ class PhotoViewer(tk.Toplevel):
 		self.photo_image = ImageTk.PhotoImage(image)
 		ttk.Label(self, image = self.photo_image).pack()
 		self.bind("<Escape>", lambda event: self.destroy())
+		set_title_bar_theme(self)
 
 
 class UnknownNamesDialog(tk.Toplevel):
@@ -950,6 +1154,7 @@ class UnknownNamesDialog(tk.Toplevel):
 		self.bind("<Return>", lambda event: self.validate())
 		self.bind("<Escape>", lambda event: self.destroy())
 		strip_widget_emoji(self)
+		set_title_bar_theme(self)
 		self.grab_set()
 		self.show_current()
 
@@ -984,7 +1189,7 @@ class UnknownNamesDialog(tk.Toplevel):
 		best = sorted(self.person.faces, key = lambda f: -f.score)[:12]
 		thumbnails = self.app.database.thumbnails([face.face_id for face in best])
 		for position, face in enumerate(best):
-			image = ImageTk.PhotoImage(decode_thumbnail(thumbnails.get(face.face_id)))
+			image = thumbnail_photo(thumbnails.get(face.face_id))
 			self.images.append(image)
 			ttk.Label(self.gallery, image = image).grid(row = position // 6, column = position % 6, padx = 3, pady = 3)
 		self.variable.set("")
@@ -1021,10 +1226,15 @@ class FaceTaggerApp(tk.Tk):
 	"""Fenêtre principale de l'application."""
 
 	def __init__(self, options: argparse.Namespace):
-		# Avant super().__init__() : l'identité dans la barre des tâches doit précéder la création de la fenêtre
+		# Avant super().__init__() : l'identité dans la barre des tâches et la gestion de la résolution de l'écran
+		# doivent précéder la création de la première fenêtre
 		set_windows_app_id()
+		enable_dpi_awareness()
 		super().__init__()
 		self.options = options
+		SETTINGS["scale"] = screen_scale(self)
+		if SETTINGS["dark"]:
+			apply_dark_theme(self)
 		self.title(emoji("👥 Face Tagger — visages par personne"))
 		# Icône de la fenêtre, et par défaut de toutes les boîtes de dialogue (Toplevel). Linux et macOS refusent
 		# les fichiers .ico (TclError) : sans icône, l'application démarre quand même, de même si le fichier est
@@ -1034,7 +1244,13 @@ class FaceTaggerApp(tk.Tk):
 			self.iconbitmap(default = icon_file)
 		except tk.TclError:
 			pass
-		self.geometry("1300x820")
+		# Taille prévue pour un écran à 100 %, agrandie selon l'échelle, mais limitée à la zone utile de l'écran
+		# (barre des tâches exclue) et centrée dedans. La hauteur demandée à Tk exclut la barre de titre.
+		left, top, area_width, area_height = work_area(self)
+		title_bar = scaled(32)
+		width = min(scaled(1300), area_width - scaled(16))
+		height = min(scaled(820), area_height - title_bar - scaled(16))
+		self.geometry(f"{width}x{height}+{left + (area_width - width) // 2}+{top + (area_height - height - title_bar) // 2}")
 		self.data_directory = Path(options.data_directory).expanduser()
 		self.exiftool = ExifTool(options.exiftool)
 		self.library = Library()
@@ -1064,6 +1280,7 @@ class FaceTaggerApp(tk.Tk):
 
 		self.build_widgets()
 		strip_widget_emoji(self)
+		set_title_bar_theme(self)
 		self.protocol("WM_DELETE_WINDOW", self.on_close)
 		self.after(100, self.poll_events)
 		if not self.exiftool.available:
@@ -1076,7 +1293,7 @@ class FaceTaggerApp(tk.Tk):
 	# ---------- Construction de la fenêtre ----------
 
 	def build_widgets(self) -> None:
-		ttk.Style(self).configure("Treeview", rowheight = TREE_ROW_HEIGHT)
+		ttk.Style(self).configure("Treeview", rowheight = scaled(TREE_ROW_HEIGHT))
 
 		# --- Barre du haut : dossier et lancement de l'analyse ---
 		top = ttk.Frame(self, padding = 6)
@@ -1095,7 +1312,7 @@ class FaceTaggerApp(tk.Tk):
 		ttk.Label(settings, text = "🎚️ Seuil de similarité :").pack(side = "left")
 		self.threshold_label = ttk.Label(settings, text = f"{self.threshold_var.get():.2f}", width = 5)
 		ttk.Scale(
-			settings, from_ = 0.20, to = 0.70, variable = self.threshold_var, length = 220,
+			settings, from_ = 0.20, to = 0.70, variable = self.threshold_var, length = scaled(220),
 			command = lambda value: self.threshold_label.configure(text = f"{float(value):.2f}"),
 		).pack(side = "left", padx = 6)
 		self.threshold_label.pack(side = "left")
@@ -1117,10 +1334,10 @@ class FaceTaggerApp(tk.Tk):
 		self.tree.heading("faces", text = "Visages")
 		self.tree.heading("photos", text = "Photos")
 		self.tree.heading("source", text = "Origine du nom")
-		self.tree.column("#0", width = 220)
-		self.tree.column("faces", width = 60, anchor = "center")
-		self.tree.column("photos", width = 60, anchor = "center")
-		self.tree.column("source", width = 110)
+		self.tree.column("#0", width = scaled(220))
+		self.tree.column("faces", width = scaled(60), anchor = "center")
+		self.tree.column("photos", width = scaled(60), anchor = "center")
+		self.tree.column("source", width = scaled(110))
 		tree_scroll = ttk.Scrollbar(left, orient = "vertical", command = self.tree.yview)
 		self.tree.configure(yscrollcommand = tree_scroll.set)
 		person_buttons = ttk.Frame(left)
@@ -1189,8 +1406,15 @@ class FaceTaggerApp(tk.Tk):
 		self.progress = ttk.Progressbar(self, mode = "determinate")
 		self.progress.pack(fill = "x", padx = 6)
 		ttk.Label(self, textvariable = self.status_var, padding = (6, 2)).pack(fill = "x")
-		self.log_text = ScrolledText(self, height = 8, state = "disabled", wrap = "word")
-		self.log_text.pack(fill = "x", padx = 6, pady = (0, 6))
+		# Journal : zone de texte et ascenseur ttk (celui de ScrolledText, natif sous Windows, resterait clair en
+		# mode sombre)
+		log_frame = ttk.Frame(self)
+		log_frame.pack(fill = "x", padx = 6, pady = (0, 6))
+		self.log_text = tk.Text(log_frame, height = 8, state = "disabled", wrap = "word")
+		log_scroll = ttk.Scrollbar(log_frame, orient = "vertical", command = self.log_text.yview)
+		self.log_text.configure(yscrollcommand = log_scroll.set)
+		log_scroll.pack(side = "right", fill = "y")
+		self.log_text.pack(side = "left", fill = "x", expand = True)
 
 	# ---------- Journal et communication avec les threads ----------
 
@@ -1392,8 +1616,7 @@ class FaceTaggerApp(tk.Tk):
 			best = bests[person.identifier]
 			icon = self.icon_cache.get(best.face_id)
 			if icon is None:
-				size = TREE_ROW_HEIGHT - 4
-				icon = ImageTk.PhotoImage(decode_thumbnail(thumbnails.get(best.face_id)).resize((size, size)))
+				icon = thumbnail_photo(thumbnails.get(best.face_id), TREE_ROW_HEIGHT - 4)
 				self.icon_cache[best.face_id] = icon
 			label = emoji(("🙈 " if person.ignored else "") + (person.name or f"❓ Inconnu n°{person.identifier}"))
 			origin = {"tag": "🏷️ étiquette", "manual": "✍️ saisi"}.get(person.source, "")
@@ -1475,7 +1698,7 @@ class FaceTaggerApp(tk.Tk):
 		# Les vignettes de la page sont lues dans la base en une seule requête
 		thumbnails = self.database.thumbnails([face.face_id for face in chunk])
 		for face in chunk:
-			image = ImageTk.PhotoImage(decode_thumbnail(thumbnails.get(face.face_id)))
+			image = thumbnail_photo(thumbnails.get(face.face_id))
 			self.face_images.append(image)
 			label = ttk.Label(self.faces_frame, image = image, text = os.path.basename(face.photo)[:16], compound = "top")
 			label.bind("<Double-Button-1>", lambda event, f = face: self.open_photo(f))
@@ -1490,7 +1713,7 @@ class FaceTaggerApp(tk.Tk):
 
 	def layout_faces(self, force: bool = False) -> None:
 		"""Place les vignettes en grille. N'est refaite que si le nombre de colonnes change."""
-		columns = max(1, self.canvas.winfo_width() // (THUMBNAIL_SIZE + 24))
+		columns = max(1, self.canvas.winfo_width() // scaled(THUMBNAIL_SIZE + 24))
 		if columns == self.grid_columns and not force:
 			return
 		self.grid_columns = columns
@@ -1762,12 +1985,18 @@ def parse_arguments() -> argparse.Namespace:
 	parser.add_argument("--detection-score", type = float, default = 0.80, help = "🎯 Score minimal de détection d'un visage (0 à 1)")
 	parser.add_argument("--no-backup", action = "store_true", help = "⚠️ Ne pas conserver de copie *_original lors de l'écriture")
 	parser.add_argument("--no-emoji", action = "store_true", help = "🚫 Désactive les emojis (si Tk plante à leur affichage)")
+	parser.add_argument(
+		"--theme", choices = ("auto", "light", "dark"), default = "auto",
+		help = "🌓 Thème de l'interface : auto (celui de Windows, défaut), light (clair) ou dark (sombre)",
+	)
 	return parser.parse_args()
 
 
 def main() -> None:
 	options = parse_arguments()
 	SETTINGS["emoji"] = not options.no_emoji
+	# « auto » ne suit que Windows : sous macOS, le thème natif de Tk suit déjà le mode sombre du système
+	SETTINGS["dark"] = options.theme == "dark" or (options.theme == "auto" and windows_prefers_dark())
 	# Évite les erreurs d'encodage des emojis dans les consoles Windows
 	for stream in (sys.stdout, sys.stderr):
 		if hasattr(stream, "reconfigure"):

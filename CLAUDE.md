@@ -44,7 +44,7 @@ python face_tagger.py --directory "D:\Photos"
 - Versions dans le `.venv` actuel : Python 3.14, OpenCV 5.0.0.93, NumPy 2.5.4, Pillow 13.0.0, pillow-heif 1.8.1, PyInstaller 6.22.3. (`ttkthemes` y est aussi installé mais n'est ni utilisé ni dans `requirements.txt`.)
 - Au premier lancement, les modèles ONNX (≈ 37 Mo) sont téléchargés dans `%USERPROFILE%\.face_tagger\models`.
 
-Options de `face_tagger.py` : `--directory`, `--data-directory` (défaut `~/.face_tagger`), `--database` (défaut `<data-directory>/face_tagger.sqlite`), `--page-size` (100), `--exiftool`, `--threshold` (0.40, borné entre 0.20 et 0.70), `--max-image-size` (2000), `--min-face-size` (40), `--detection-score` (0.80), `--no-backup`, `--no-emoji`.
+Options de `face_tagger.py` : `--directory`, `--data-directory` (défaut `~/.face_tagger`), `--database` (défaut `<data-directory>/face_tagger.sqlite`), `--page-size` (100), `--exiftool`, `--threshold` (0.40, borné entre 0.20 et 0.70), `--max-image-size` (2000), `--min-face-size` (40), `--detection-score` (0.80), `--no-backup`, `--no-emoji`, `--theme` (`auto`, `light` ou `dark` ; défaut `auto`, qui suit Windows).
 
 Restauration des sauvegardes `*_original` d'ExifTool (aussi disponible par le bouton « Restaurer les sauvegardes… ») :
 
@@ -123,6 +123,14 @@ Sections de `face_tagger.py`, dans l'ordre :
 - Les threads de travail **ne touchent jamais Tk** : ils envoient des événements avec `self.post(...)` (file `queue.Queue`), lus par `poll_events` toutes les 100 ms.
 - Conserver une référence à chaque `ImageTk.PhotoImage` (`icon_cache`, `face_images`), sinon l'image disparaît.
 - Affichage **paginé** (`render_page`, 50 / 100 / 200 / 500 par page) : seules les vignettes de la page courante sont en mémoire.
+- **Thème sombre** : avec `--theme auto`, il est choisi d'après la valeur `AppsUseLightTheme` du registre ; sous macOS, `auto` garde le thème natif, qui suit déjà le système. `apply_dark_theme()` passe ttk sur le thème `clam` (les thèmes natifs `vista` et `winnative` ne se recolorent pas) et remplit la base d'options pour les widgets Tk classiques : elle doit donc être appelée **avant** la création des widgets. Le thème clair garde le thème natif. Les couleurs sont dans `DARK_COLORS`.
+	- Barre de titre : appeler `set_title_bar_theme()` (attribut DWM 20) pour **chaque** fenêtre, y compris toute nouvelle boîte de dialogue.
+	- Le journal est un `tk.Text` avec un `ttk.Scrollbar`, car l'ascenseur natif de `ScrolledText` ne se recolore pas.
+	- Restent clairs : les `messagebox` et le sélecteur de dossier, qui sont natifs. Le thème est lu au démarrage, sans bascule en cours d'exécution.
+- **Écrans à haute résolution** : `enable_dpi_awareness()` (mode « système ») est appelée avant la création de la fenêtre. Tk agrandit alors seul les polices (exprimées en points), mais toute taille en **pixels** doit passer par `scaled()` (`SETTINGS["scale"]`, qui vaut 1.25 à 125 %).
+	- Les vignettes restent stockées en 96 px et sont agrandies à l'affichage par `thumbnail_photo()`.
+	- La fenêtre est limitée à la zone utile de l'écran (`work_area()`, barre des tâches exclue) et centrée dedans.
+	- Poste de Lionel : 1920×1080 à 125 %, Windows en mode sombre, couleur d'accentuation affichée sur les barres de titre (elle l'emporte sur la barre sombre quand la fenêtre est active).
 
 ### Modèles et OpenCV
 
@@ -139,6 +147,11 @@ Pour en ajouter (pytest, dossier `tests/`) :
 - `Database` et `restore_originals` : sur des **copies** de photos, avec ExifTool.
 - Interface : remplacer `face_tagger.FaceEngine` et `face_tagger.ensure_models` par un faux moteur renvoyant des empreintes synthétiques (octets `float32` × 128) et des vignettes JPEG ; remplacer `messagebox.askyesno` ; piloter `start_scan`, `start_write`, `start_restore` ; sous Linux, utiliser `xvfb-run`.
 - **Ne jamais tester sur de vraies photos** : toujours des copies, en gardant les `*_original`.
+- Vérification visuelle sous Windows (méthode déjà employée pour le thème sombre et la haute résolution) :
+	- lancer avec un `--data-directory` temporaire ;
+	- remplir `app.library` de personnes fictives et remplacer `app.database.thumbnails` par des vignettes générées ;
+	- capturer la fenêtre avec `PIL.ImageGrab`, en obtenant son rectangle par `DwmGetWindowAttribute(…, 9, …)`.
+	- Ces fenêtres s'ouvrent sur l'écran de Lionel : limiter le nombre de lancements.
 
 ## Points à traiter
 

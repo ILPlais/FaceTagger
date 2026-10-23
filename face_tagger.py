@@ -20,6 +20,7 @@ les noms dans les métadonnées des photos.
 		courante sont chargées en mémoire).
 	9. Les sauvegardes *_original d'ExifTool se restaurent d'un coup (bouton, ou restore_originals.py).
 	10. L'interface suit le mode sombre de Windows (ou --theme) et reste nette sur les écrans à haute résolution.
+	11. Une infobulle explique chaque commande, réglage et colonne de l'interface.
 
 Fichiers à placer dans le même dossier : face_tagger.py, face_database.py, restore_originals.py
 
@@ -102,6 +103,8 @@ THUMBNAIL_SIZE = 96          # Côté (en pixels) des vignettes de visages
 TREE_ROW_HEIGHT = 44         # Hauteur des lignes de la liste des personnes
 MAX_FACES_SHOWN = 150        # Nombre maximal de vignettes affichées pour une personne
 ICON_CACHE_SIZE = 4000       # Nombre maximal d'icônes de la liste des personnes gardées en mémoire
+TOOLTIP_DELAY = 500          # Délai (en millisecondes) avant l'apparition d'une infobulle, celui de Windows
+TOOLTIP_WIDTH = 380          # Largeur maximale (en pixels, écran à 100 %) du texte d'une infobulle
 REGION_MATCH_IOU = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
 EXIFTOOL_BATCH = 25          # Nombre de photos modifiées par appel à ExifTool
 
@@ -124,6 +127,12 @@ DARK_COLORS = {
 	"selection": "#0067c0",         # Fond de la sélection (bleu de Windows)
 	"selection_text": "#ffffff",    # Texte sélectionné
 	"accent": "#4cc2ff",            # Barre de progression
+}
+
+# Couleurs des infobulles pour chaque thème (le thème sombre reprend les teintes de DARK_COLORS)
+TOOLTIP_COLORS = {
+	"light": {"background": "#ffffff", "text": "#1a1a1a", "border": "#767676"},
+	"dark": {"background": DARK_COLORS["surface"], "text": DARK_COLORS["text"], "border": DARK_COLORS["thumb"]},
 }
 
 # Réglages globaux : emojis et thème viennent de la ligne de commande, l'échelle de l'écran est mesurée au démarrage
@@ -1043,6 +1052,122 @@ def apply_dark_theme(root: tk.Tk) -> None:
 		root.option_add(pattern, value)
 
 
+class ToolTip:
+	"""Infobulle : courte aide affichée quand la souris s'arrête sur un widget.
+
+	Tkinter n'en propose pas. Le texte est fixe, ou calculé d'après la position de la souris par une fonction qui
+	reçoit l'événement et renvoie le texte (None : pas d'infobulle) ; la liste des personnes s'en sert pour décrire
+	la colonne ou la ligne survolée. Comme sous Windows, l'infobulle n'apparaît qu'une fois la souris immobile, et
+	un clic la masque jusqu'à ce que la souris quitte l'élément (ou passe sur une autre ligne).
+	"""
+
+	def __init__(self, widget: tk.Misc, text: str | Callable[[tk.Event], Optional[str]]):
+		self.widget = widget
+		self.text = text
+		self.window: Optional[tk.Toplevel] = None
+		self.timer: Optional[str] = None          # Minuteur d'apparition (identifiant renvoyé par after)
+		self.current: Optional[str] = None        # Texte affiché, ou en attente d'affichage
+		self.silenced: Optional[str] = None       # Texte masqué par un clic, jusqu'à la sortie de la souris
+		self.position = (0, 0)                    # Position de la souris à l'écran
+		# add = "+" : les liaisons déjà posées sur le widget (menu contextuel, molette…) sont conservées. Les
+		# clics sont liés bouton par bouton : pour un même widget, Tk n'exécute que la liaison la plus précise, et
+		# un <ButtonPress> générique serait ignoré au profit d'un <Button-3> existant.
+		for sequence in ("<Enter>", "<Motion>"):
+			widget.bind(sequence, self.on_motion, add = "+")
+		widget.bind("<Leave>", self.on_leave, add = "+")
+		for sequence in ("<Button-1>", "<Button-2>", "<Button-3>"):
+			widget.bind(sequence, self.on_press, add = "+")
+		# Molette (Windows, macOS, puis Linux) et clavier : le contenu sous la souris peut changer
+		for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyPress>"):
+			widget.bind(sequence, self.hide, add = "+")
+		# Un widget détruit (changement de page, fermeture d'une boîte de dialogue) ne doit pas laisser de
+		# minuteur derrière lui : son rappel désignerait une commande Tcl déjà supprimée
+		widget.bind("<Destroy>", self.hide, add = "+")
+
+	def text_at(self, event: tk.Event) -> Optional[str]:
+		"""Texte de l'infobulle à l'endroit survolé."""
+		return self.text(event) if callable(self.text) else self.text
+
+	def on_motion(self, event: tk.Event) -> None:
+		"""Relance le minuteur à chaque mouvement : l'infobulle n'apparaît qu'une fois la souris immobile."""
+		text = self.text_at(event)
+		if text is not None and text == self.silenced:
+			return              # Clic récent sur cet élément : pas d'infobulle avant la sortie de la souris
+		self.silenced = None
+		if self.window is not None and text == self.current:
+			return              # Infobulle déjà affichée pour ce texte : elle reste en place
+		self.hide()
+		if text:
+			self.current = text
+			self.position = (event.x_root, event.y_root)
+			self.timer = self.widget.after(TOOLTIP_DELAY, self.show)
+
+	def on_leave(self, event: tk.Event) -> None:
+		self.silenced = None
+		self.hide()
+
+	def on_press(self, event: tk.Event) -> None:
+		self.silenced = self.text_at(event)
+		self.hide()
+
+	def hide(self, event: Optional[tk.Event] = None) -> None:
+		"""Annule l'apparition prévue et ferme l'infobulle affichée."""
+		if self.timer is not None:
+			self.widget.after_cancel(self.timer)
+			self.timer = None
+		if self.window is not None:
+			self.window.destroy()
+			self.window = None
+		self.current = None
+
+	def show(self) -> None:
+		"""Ouvre l'infobulle sous la souris, sans déborder de l'écran."""
+		self.timer = None
+		if not self.current or not self.widget.winfo_exists():
+			return
+		colors = TOOLTIP_COLORS["dark" if SETTINGS["dark"] else "light"]
+		# Fenêtre sans cadre ni barre de titre (set_title_bar_theme est donc inutile), cachée le temps de la placer
+		window = tk.Toplevel(self.widget, background = colors["border"])
+		window.withdraw()
+		window.wm_overrideredirect(True)
+		# Toujours au premier plan, comme les infobulles de Windows : sinon une fenêtre elle-même au premier plan
+		# (y compris celle survolée) la recouvrirait
+		window.wm_attributes("-topmost", True)
+		try:
+			# macOS : fenêtre d'aide, qui ne prend pas l'activation à la fenêtre survolée
+			window.tk.call("::tk::unsupported::MacWindowStyle", "style", window._w, "help", "noActivates")
+		except tk.TclError:
+			pass
+		# Ligne par ligne : avec --no-emoji, emoji() retire l'emoji de tête mais aussi l'espace qui le suit. Le
+		# sélecteur de variante U+FE0F qui suit certains emojis (🏷️, 🖼️, 🖱️…) est dessiné par Tk comme un large
+		# blanc (vérifié sous Windows) : sans lui, l'emoji s'affiche à l'identique.
+		text = "\n".join(emoji(line) for line in self.current.split("\n")).replace("️", "")
+		tk.Label(
+			window, text = text, justify = "left", wraplength = scaled(TOOLTIP_WIDTH), font = "TkTooltipFont",
+			background = colors["background"], foreground = colors["text"], padx = scaled(6), pady = scaled(4),
+		).pack(padx = 1, pady = 1)      # Le fond de la fenêtre, visible sur un pixel, dessine la bordure
+		window.update_idletasks()
+		width, height = window.winfo_reqwidth(), window.winfo_reqheight()
+		pointer_x, pointer_y = self.position
+		x, y = pointer_x + scaled(12), pointer_y + scaled(20)
+		# La zone utile n'est connue que pour l'écran principal : sur un autre écran, pas de correction
+		left, top, area_width, area_height = work_area(self.widget)
+		if left <= pointer_x < left + area_width and top <= pointer_y < top + area_height:
+			x = max(left, min(x, left + area_width - width))
+			if y + height > top + area_height:
+				# Au-dessus du pointeur : placée sous la souris, l'infobulle ferait sortir la souris du widget,
+				# donc disparaîtrait aussitôt pour réapparaître ensuite (clignotement)
+				y = pointer_y - height - scaled(4)
+		window.wm_geometry(f"+{x}+{y}")
+		window.deiconify()
+		self.window = window
+
+
+def photo_caption(photo: str) -> str:
+	"""Nom et dossier d'une photo, pour l'infobulle d'une vignette (le libellé de la vignette est tronqué)."""
+	return f"🖼️ {os.path.basename(photo)}\n📁 {os.path.dirname(photo)}"
+
+
 class NameDialog(tk.Toplevel):
 	"""Boîte de saisie d'un nom, avec liste déroulante des noms déjà connus."""
 
@@ -1060,10 +1185,15 @@ class NameDialog(tk.Toplevel):
 		self.combobox.pack(padx = 12)
 		# La liste se restreint au fil de la frappe
 		self.combobox.bind("<KeyRelease>", self.filter_choices)
+		ToolTip(self.combobox, "🔤 Tapez un nom ou choisissez-le dans la liste, qui se restreint au fil de la frappe.")
 		buttons = ttk.Frame(self, padding = 8)
 		buttons.pack()
-		ttk.Button(buttons, text = "✅ Valider", command = self.accept).pack(side = "left", padx = 4)
-		ttk.Button(buttons, text = "✖️ Annuler", command = self.destroy).pack(side = "left", padx = 4)
+		accept_button = ttk.Button(buttons, text = "✅ Valider", command = self.accept)
+		accept_button.pack(side = "left", padx = 4)
+		ToolTip(accept_button, "✅ Enregistre ce nom (touche Entrée).")
+		cancel_button = ttk.Button(buttons, text = "✖️ Annuler", command = self.destroy)
+		cancel_button.pack(side = "left", padx = 4)
+		ToolTip(cancel_button, "✖️ Ferme sans rien changer (touche Échap).")
 		self.bind("<Return>", lambda event: self.accept())
 		self.bind("<Escape>", lambda event: self.destroy())
 		strip_widget_emoji(self)
@@ -1145,12 +1275,24 @@ class UnknownNamesDialog(tk.Toplevel):
 		self.combobox = ttk.Combobox(self, textvariable = self.variable, width = 44)
 		self.combobox.pack(padx = 12, pady = 4)
 		self.combobox.bind("<KeyRelease>", self.filter_choices)
+		ToolTip(
+			self.combobox,
+			"🔤 Tapez un nom ou choisissez-le dans la liste, qui se restreint au fil de la frappe.\n"
+			"💡 Un nom déjà utilisé réunit cette personne et celle qui porte déjà ce nom.",
+		)
 		buttons = ttk.Frame(self, padding = 8)
 		buttons.pack()
-		ttk.Button(buttons, text = "✅ Valider", command = self.validate).pack(side = "left", padx = 4)
-		ttk.Button(buttons, text = "⏭️ Passer", command = self.skip).pack(side = "left", padx = 4)
-		ttk.Button(buttons, text = "🙈 Ignorer cette personne", command = self.ignore).pack(side = "left", padx = 4)
-		ttk.Button(buttons, text = "⏹️ Terminer", command = self.destroy).pack(side = "left", padx = 4)
+		for text, command, tip in (
+			("✅ Valider", self.validate, "✅ Donne ce nom à la personne et passe à la suivante (touche Entrée)."),
+			("⏭️ Passer", self.skip, "⏭️ Laisse cette personne sans nom pour l'instant et passe à la suivante."),
+			("🙈 Ignorer cette personne", self.ignore,
+				"🙈 Met cette personne de côté : elle ne sera plus proposée ni écrite dans les métadonnées.\n"
+				"💡 Réversible avec « Ignorer / réactiver » dans la fenêtre principale."),
+			("⏹️ Terminer", self.destroy, "⏹️ Ferme cette fenêtre (touche Échap) : les noms déjà saisis sont conservés."),
+		):
+			button = ttk.Button(buttons, text = text, command = command)
+			button.pack(side = "left", padx = 4)
+			ToolTip(button, tip)
 		self.bind("<Return>", lambda event: self.validate())
 		self.bind("<Escape>", lambda event: self.destroy())
 		strip_widget_emoji(self)
@@ -1191,7 +1333,9 @@ class UnknownNamesDialog(tk.Toplevel):
 		for position, face in enumerate(best):
 			image = thumbnail_photo(thumbnails.get(face.face_id))
 			self.images.append(image)
-			ttk.Label(self.gallery, image = image).grid(row = position // 6, column = position % 6, padx = 3, pady = 3)
+			label = ttk.Label(self.gallery, image = image)
+			label.grid(row = position // 6, column = position % 6, padx = 3, pady = 3)
+			ToolTip(label, photo_caption(face.photo))
 		self.variable.set("")
 		self.combobox.configure(values = self.known_names())
 		self.combobox.focus_set()
@@ -1298,30 +1442,76 @@ class FaceTaggerApp(tk.Tk):
 		# --- Barre du haut : dossier et lancement de l'analyse ---
 		top = ttk.Frame(self, padding = 6)
 		top.pack(fill = "x")
-		ttk.Label(top, text = "📁 Dossier :").pack(side = "left")
-		ttk.Entry(top, textvariable = self.directory_var).pack(side = "left", fill = "x", expand = True, padx = 6)
-		ttk.Button(top, text = "Parcourir…", command = self.choose_directory).pack(side = "left")
+		directory_label = ttk.Label(top, text = "📁 Dossier :")
+		directory_label.pack(side = "left")
+		directory_entry = ttk.Entry(top, textvariable = self.directory_var)
+		directory_entry.pack(side = "left", fill = "x", expand = True, padx = 6)
+		for widget in (directory_label, directory_entry):
+			ToolTip(widget, "📁 Dossier de photos à analyser, sous-dossiers compris.\n💡 Saisissez son chemin ou choisissez-le avec « Parcourir… ».")
+		browse_button = ttk.Button(top, text = "Parcourir…", command = self.choose_directory)
+		browse_button.pack(side = "left")
+		ToolTip(browse_button, "📂 Choisir le dossier de photos à analyser.")
 		self.scan_button = ttk.Button(top, text = "🔍 Analyser", command = self.start_scan)
 		self.scan_button.pack(side = "left", padx = 6)
+		ToolTip(
+			self.scan_button,
+			"🔍 Détecte les visages des photos du dossier, lit les noms déjà présents dans leurs métadonnées, "
+			"puis regroupe les visages par personne.\n"
+			"💡 Les photos déjà analysées et inchangées sont reprises de la base : un nouveau passage est rapide.\n"
+			"📥 Au premier lancement, les modèles de reconnaissance (≈ 37 Mo) sont téléchargés.",
+		)
 		self.stop_button = ttk.Button(top, text = "⏹️ Arrêter", command = self.cancel_event.set, state = "disabled")
 		self.stop_button.pack(side = "left")
+		ToolTip(
+			self.stop_button,
+			f"⏹️ Interrompt l'analyse (après la photo en cours) ou l'écriture (après le lot de {EXIFTOOL_BATCH} photos "
+			"en cours). Le travail déjà fait est conservé.\n"
+			"⚠️ Une restauration des sauvegardes, elle, va jusqu'au bout.",
+		)
 
 		# --- Réglages du regroupement ---
 		settings = ttk.Frame(self, padding = (6, 0))
 		settings.pack(fill = "x")
-		ttk.Label(settings, text = "🎚️ Seuil de similarité :").pack(side = "left")
+		threshold_title = ttk.Label(settings, text = "🎚️ Seuil de similarité :")
+		threshold_title.pack(side = "left")
 		self.threshold_label = ttk.Label(settings, text = f"{self.threshold_var.get():.2f}", width = 5)
-		ttk.Scale(
+		threshold_scale = ttk.Scale(
 			settings, from_ = 0.20, to = 0.70, variable = self.threshold_var, length = scaled(220),
 			command = lambda value: self.threshold_label.configure(text = f"{float(value):.2f}"),
-		).pack(side = "left", padx = 6)
+		)
+		threshold_scale.pack(side = "left", padx = 6)
 		self.threshold_label.pack(side = "left")
-		ttk.Label(settings, text = "(plus bas = groupes plus larges)").pack(side = "left", padx = 4)
-		ttk.Checkbutton(
+		threshold_hint = ttk.Label(settings, text = "(plus bas = groupes plus larges)")
+		threshold_hint.pack(side = "left", padx = 4)
+		# Le réglage, sa valeur et leurs libellés portent la même infobulle
+		for widget in (threshold_title, threshold_scale, self.threshold_label, threshold_hint):
+			ToolTip(
+				widget,
+				"🎚️ Ressemblance minimale entre deux visages pour les attribuer à la même personne (de 0.20 à 0.70).\n"
+				"⬆️ Plus haut : groupes plus sûrs, mais une même personne peut être répartie entre plusieurs groupes.\n"
+				"⬇️ Plus bas : groupes plus larges, au risque de mélanger des personnes.\n"
+				"💡 S'applique à la prochaine analyse, ou tout de suite avec « Regrouper à nouveau ».",
+			)
+		keywords_check = ttk.Checkbutton(
 			settings, text = "Utiliser aussi les mots-clés comme noms candidats", variable = self.keywords_var,
-		).pack(side = "left", padx = 16)
+		)
+		keywords_check.pack(side = "left", padx = 16)
+		ToolTip(
+			keywords_check,
+			"🏷️ En plus de PersonInImage, les mots-clés des photos (XMP, IPTC, Windows) servent à nommer les groupes : "
+			"un nom est retenu s'il figure dans au moins 60 % des photos d'un groupe.\n"
+			"⚠️ À cocher seulement si vos mots-clés sont des noms de personnes : un mot-clé fréquent comme "
+			"« Vacances » pourrait sinon nommer un groupe.\n"
+			"💡 S'applique à la prochaine analyse, ou tout de suite avec « Regrouper à nouveau ».",
+		)
 		self.regroup_button = ttk.Button(settings, text = "🔄 Regrouper à nouveau", command = self.regroup)
 		self.regroup_button.pack(side = "left")
+		ToolTip(
+			self.regroup_button,
+			"🔄 Refait le regroupement avec le seuil et l'option ci-contre, sans ré-analyser les photos.\n"
+			"⚠️ Les modifications manuelles (noms saisis, fusions, visages déplacés, personnes ignorées) sont perdues ; "
+			"les noms lus dans les photos sont retrouvés.",
+		)
 
 		# --- Zone centrale : personnes à gauche, visages de la personne choisie à droite ---
 		panes = ttk.PanedWindow(self, orient = "horizontal")
@@ -1342,14 +1532,38 @@ class FaceTaggerApp(tk.Tk):
 		self.tree.configure(yscrollcommand = tree_scroll.set)
 		person_buttons = ttk.Frame(left)
 		person_buttons.pack(side = "bottom", fill = "x", pady = 4)
-		ttk.Button(person_buttons, text = "✏️ Renommer…", command = self.rename_selected).pack(side = "left", padx = 2)
-		ttk.Button(person_buttons, text = "🔗 Fusionner", command = self.merge_selected).pack(side = "left", padx = 2)
-		ttk.Button(person_buttons, text = "🙈 Ignorer / réactiver", command = self.toggle_ignore).pack(side = "left", padx = 2)
-		ttk.Button(person_buttons, text = "🧩 Nommer les inconnus…", command = self.name_unknowns).pack(side = "left", padx = 2)
+		for text, command, tip in (
+			("✏️ Renommer…", self.rename_selected,
+				"✏️ Nomme la personne sélectionnée (aussi par double-clic dans la liste).\n"
+				"💡 Un nom déjà utilisé réunit les deux groupes en une seule personne."),
+			("🔗 Fusionner", self.merge_selected,
+				"🔗 Réunit en une seule personne les groupes sélectionnés, quand une même personne a été répartie "
+				"entre plusieurs groupes. Le nom conservé est celui d'un groupe nommé, le plus grand s'il y en a plusieurs.\n"
+				"🖱️ Ctrl ou Maj + clic dans la liste pour sélectionner plusieurs personnes."),
+			("🙈 Ignorer / réactiver", self.toggle_ignore,
+				"🙈 Met de côté les personnes sélectionnées (inconnus de passage, visages mal détectés…) : elles ne sont "
+				"plus proposées par « Nommer les inconnus » ni écrites dans les métadonnées.\n"
+				"🔁 Un second clic les réactive."),
+			("🧩 Nommer les inconnus…", self.name_unknowns,
+				"🧩 Présente une à une les personnes sans nom, des plus fréquentes aux plus rares, pour les nommer rapidement."),
+		):
+			button = ttk.Button(person_buttons, text = text, command = command)
+			button.pack(side = "left", padx = 2)
+			ToolTip(button, tip)
 		tree_scroll.pack(side = "right", fill = "y")
 		self.tree.pack(side = "left", fill = "both", expand = True)
 		self.tree.bind("<<TreeviewSelect>>", self.on_select)
 		self.tree.bind("<Double-Button-1>", lambda event: self.rename_selected())
+		# Infobulle selon l'endroit survolé : rôle de la colonne sur les en-têtes, résumé de la personne sur les lignes
+		self.heading_tips = {
+			"#0": "👤 Nom de la personne, ou « Inconnu n°… » tant qu'elle n'est pas nommée. Les personnes nommées "
+				"viennent d'abord (par ordre alphabétique), puis les inconnues, des plus fréquentes aux plus rares.",
+			"#1": "🙂 Nombre de visages regroupés pour cette personne.",
+			"#2": "🖼️ Nombre de photos où elle apparaît.",
+			"#3": "🏷️ étiquette : nom lu dans les métadonnées des photos.\n✍️ saisi : nom donné dans Face Tagger.\n"
+				"❓ vide : personne pas encore nommée.",
+		}
+		ToolTip(self.tree, self.tree_tooltip)
 
 		right = ttk.Frame(panes)
 		panes.add(right, weight = 3)
@@ -1366,14 +1580,28 @@ class FaceTaggerApp(tk.Tk):
 		self.last_button = ttk.Button(navigation, text = "»", width = 3, command = lambda: self.go_to_page(10 ** 9))
 		for widget in (self.first_button, self.previous_button, self.page_label, self.next_button, self.last_button):
 			widget.pack(side = "left", padx = 1)
+		for widget, tip in (
+			(self.first_button, "⏮️ Première page"),
+			(self.previous_button, "⬅️ Page précédente"),
+			(self.next_button, "➡️ Page suivante"),
+			(self.last_button, "⏭️ Dernière page"),
+		):
+			ToolTip(widget, tip)
 		self.range_label = ttk.Label(navigation, text = "")
 		self.range_label.pack(side = "left", padx = 10)
 		self.page_size_box = ttk.Combobox(
 			navigation, textvariable = self.page_size_var, values = ("50", "100", "200", "500"), width = 5, state = "readonly",
 		)
 		self.page_size_box.pack(side = "right")
-		ttk.Label(navigation, text = "Par page :").pack(side = "right", padx = 4)
+		page_size_label = ttk.Label(navigation, text = "Par page :")
+		page_size_label.pack(side = "right", padx = 4)
 		self.page_size_box.bind("<<ComboboxSelected>>", lambda event: self.go_to_page(0))
+		for widget in (page_size_label, self.page_size_box):
+			ToolTip(
+				widget,
+				"📄 Nombre de vignettes par page. Seules celles de la page affichée sont chargées : "
+				"une valeur plus petite économise la mémoire et accélère l'affichage.",
+			)
 
 		ttk.Label(right, text = "Double-clic : ouvrir la photo — clic droit : déplacer ou écarter le visage").pack(anchor = "w", padx = 4)
 		self.canvas = tk.Canvas(right, highlightthickness = 0)
@@ -1393,15 +1621,45 @@ class FaceTaggerApp(tk.Tk):
 		# --- Bas de fenêtre : écriture des métadonnées, progression et journal ---
 		bottom = ttk.Frame(self, padding = 6)
 		bottom.pack(fill = "x")
-		ttk.Label(bottom, text = "💾 Écrire :").pack(side = "left")
-		ttk.Checkbutton(bottom, text = "régions de visages (MWG)", variable = self.write_regions_var).pack(side = "left", padx = 4)
-		ttk.Checkbutton(bottom, text = "PersonInImage", variable = self.write_person_var).pack(side = "left", padx = 4)
-		ttk.Checkbutton(bottom, text = "mots-clés (XMP, EXIF)", variable = self.write_keywords_var).pack(side = "left", padx = 4)
-		ttk.Checkbutton(bottom, text = "sauvegarde *_original", variable = self.backup_var).pack(side = "left", padx = 12)
+		write_label = ttk.Label(bottom, text = "💾 Écrire :")
+		write_label.pack(side = "left")
+		ToolTip(write_label, "💾 Métadonnées que « Écrire dans les métadonnées » inscrit dans les photos.")
+		for text, variable, padding, tip in (
+			("régions de visages (MWG)", self.write_regions_var, 4,
+				"🔲 Position et nom de chaque visage (XMP-mwg-rs:RegionInfo), au format MWG reconnu par de nombreux "
+				"logiciels de photos (digiKam, Lightroom…).\n"
+				"💡 Une personne renommée remplace son ancien nom dans les régions existantes."),
+			("PersonInImage", self.write_person_var, 4,
+				"👤 Liste des personnes présentes sur la photo (XMP-iptcExt:PersonInImage), sans leur position."),
+			("mots-clés (XMP, EXIF)", self.write_keywords_var, 4,
+				"🏷️ Ajoute les noms aux mots-clés XMP (XMP-dc:Subject) et Windows (XPKeywords, affichés par "
+				"l'Explorateur dans les propriétés du fichier).\n"
+				"💡 Les mots-clés IPTC ne sont pas modifiés : leur jeu de caractères, pas toujours déclaré, "
+				"risquerait d'abîmer les accents."),
+			("sauvegarde *_original", self.backup_var, 12,
+				"📦 Avant de modifier une photo pour la première fois, ExifTool en garde une copie « nom.jpg_original ». "
+				"Les écritures suivantes ne la remplacent pas : elle reste la version d'origine.\n"
+				"⚠️ Décochée : les photos sont modifiées sans copie de sauvegarde."),
+		):
+			check = ttk.Checkbutton(bottom, text = text, variable = variable)
+			check.pack(side = "left", padx = padding)
+			ToolTip(check, tip)
 		self.write_button = ttk.Button(bottom, text = "💾 Écrire dans les métadonnées", command = self.start_write)
 		self.write_button.pack(side = "right")
+		ToolTip(
+			self.write_button,
+			"💾 Écrit les noms des personnes nommées (et non ignorées) dans leurs photos, selon les cases cochées, "
+			"puis relit chaque photo pour vérifier.\n"
+			"💡 Les étiquettes déjà présentes sont conservées, sauf l'ancien nom d'une personne renommée.",
+		)
 		self.restore_button = ttk.Button(bottom, text = "♻️ Restaurer les sauvegardes…", command = self.start_restore)
 		self.restore_button.pack(side = "right", padx = 6)
+		ToolTip(
+			self.restore_button,
+			"♻️ Remet dans leur version d'origine les photos d'un dossier (sous-dossiers compris) : chaque copie "
+			"*_original reprend la place de la photo modifiée.\n"
+			"⚠️ Les noms écrits dans ces photos sont perdus. Le dossier est demandé, puis une confirmation.",
+		)
 
 		self.progress = ttk.Progressbar(self, mode = "determinate")
 		self.progress.pack(fill = "x", padx = 6)
@@ -1632,6 +1890,29 @@ class FaceTaggerApp(tk.Tk):
 		else:
 			self.show_person(None)
 
+	def tree_tooltip(self, event: tk.Event) -> Optional[str]:
+		"""Infobulle de la liste des personnes : rôle de la colonne sur les en-têtes, résumé de la personne sur les
+		lignes (utile quand son nom est trop long pour la colonne)."""
+		region = self.tree.identify_region(event.x, event.y)
+		if region == "heading":
+			return self.heading_tips.get(self.tree.identify_column(event.x))
+		row = self.tree.identify_row(event.y) if region in ("tree", "cell") else ""
+		person = self.library.persons.get(int(row)) if row else None
+		if person is None:
+			return None
+		if person.ignored:
+			status = "🙈 Ignorée : ni proposée par « Nommer les inconnus », ni écrite dans les métadonnées."
+		elif not person.name:
+			status = "❓ Pas encore de nom : double-clic pour la nommer."
+		elif person.source == "tag":
+			status = "🏷️ Nom lu dans les métadonnées des photos."
+		else:
+			status = "✍️ Nom saisi dans Face Tagger."
+		return (
+			f"👤 {person.display_name} — {len(person.faces)} visage(s) dans {len(person.photos)} photo(s)\n{status}\n"
+			"🖱️ Double-clic : renommer — Ctrl ou Maj + clic : sélectionner plusieurs personnes"
+		)
+
 	def selected_persons(self) -> list[Person]:
 		return [self.library.persons[int(i)] for i in self.tree.selection() if int(i) in self.library.persons]
 
@@ -1707,6 +1988,8 @@ class FaceTaggerApp(tk.Tk):
 			label.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
 			label.bind("<Button-4>", lambda event: self.canvas.yview_scroll(-1, "units"))
 			label.bind("<Button-5>", lambda event: self.canvas.yview_scroll(1, "units"))
+			# Après les liaisons ci-dessus, que l'infobulle complète sans les remplacer
+			ToolTip(label, photo_caption(face.photo) + "\n🖱️ Double-clic : ouvrir la photo — clic droit : déplacer ou écarter le visage")
 			self.face_labels.append(label)
 		self.layout_faces(force = True)
 		self.canvas.yview_moveto(0)

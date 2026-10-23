@@ -72,7 +72,7 @@ python restore_originals.py --directory "D:\Photos" --action delete --yes
 
 | Fichier | Rôle |
 |---|---|
-| `face_tagger.py` | Application complète (≈ 1750 lignes, un seul fichier découpé en sections par des bandeaux `# ====`). |
+| `face_tagger.py` | Application complète (≈ 2300 lignes, un seul fichier découpé en sections par des bandeaux `# ====`). |
 | `face_database.py` | Classe `Database` : base SQLite (bibliothèque standard uniquement). |
 | `restore_originals.py` | Restauration / suppression des `*_original` : ligne de commande **et** fonctions réutilisées par l'interface. |
 | `version.txt`, `face_tagger.ico/.png/.svg`, `requirements.txt`, `README.md` | Ressources, dépendances et documentation (le README est très succinct). |
@@ -85,7 +85,7 @@ Sections de `face_tagger.py`, dans l'ordre :
 4. **Détection et reconnaissance** : `FaceEngine` (YuNet pour la détection, SFace pour l'empreinte à 128 dimensions, via OpenCV).
 5. **Modèle de données** : `FaceRecord`, `Person`, `cluster_faces`, `Library` (`label_faces`, `rebuild`, `rename`, `merge`, `move_face`, `delete_face`).
 6. **Métadonnées à écrire** : `build_region_info`, `check_written`.
-7. **Interface** : `NameDialog`, `PhotoViewer`, `UnknownNamesDialog`, `FaceTaggerApp`.
+7. **Interface** : `ToolTip`, `photo_caption`, `NameDialog`, `PhotoViewer`, `UnknownNamesDialog`, `FaceTaggerApp`.
 8. **Ligne de commande** : `parse_arguments`, `main`.
 
 ### Flux de données
@@ -131,6 +131,11 @@ Sections de `face_tagger.py`, dans l'ordre :
 	- Les vignettes restent stockées en 96 px et sont agrandies à l'affichage par `thumbnail_photo()`.
 	- La fenêtre est limitée à la zone utile de l'écran (`work_area()`, barre des tâches exclue) et centrée dedans.
 	- Poste de Lionel : 1920×1080 à 125 %, Windows en mode sombre, couleur d'accentuation affichée sur les barres de titre (elle l'emporte sur la barre sombre quand la fenêtre est active).
+- **Infobulles** : `ToolTip(widget, texte)` (Tkinter n'en a pas). Le texte est fixe, ou une fonction qui reçoit l'événement et renvoie le texte ou `None` (`tree_tooltip` : rôle de la colonne sur les en-têtes, résumé de la personne sur les lignes). Toute nouvelle commande, case ou réglage de l'interface doit recevoir la sienne, avec des emojis en tête de ligne.
+	- Apparition après 500 ms d'immobilité (`TOOLTIP_DELAY`), disparition au clic jusqu'à la sortie de la souris. Fenêtre sans cadre, au premier plan, maintenue dans `work_area()`. Couleurs dans `TOOLTIP_COLORS`.
+	- Les liaisons sont ajoutées avec `add = "+"` : créer l'infobulle **après** les autres `bind` du widget (un `bind` sans `add` remplacerait le sien). Les clics sont liés bouton par bouton : Tk n'exécute, pour un widget, que la liaison la plus précise, et un `<ButtonPress>` générique serait ignoré au profit d'un `<Button-3>` existant.
+	- Le texte passe par `emoji()` ligne par ligne, et U+FE0F en est retiré : Tk dessine ce sélecteur de variante comme un blanc d'environ 21 px après 🏷️, 🖼️, 🖱️, ✏️, ⬆️… (mesuré). Les textes des autres widgets ont encore ce blanc (« 🏷️ étiquette » dans la liste, « 🎚️ Seuil de similarité »).
+	- `EMOJI_PATTERN` ne couvre pas tous les emojis : ℹ️ (U+2139), ◀️ et ▶️ (U+25C0, U+25B6) restent avec `--no-emoji`. Vérifier qu'un nouvel emoji est dans ses plages.
 
 ### Modèles et OpenCV
 
@@ -152,10 +157,12 @@ Pour en ajouter (pytest, dossier `tests/`) :
 	- remplir `app.library` de personnes fictives et remplacer `app.database.thumbnails` par des vignettes générées ;
 	- capturer la fenêtre avec `PIL.ImageGrab`, en obtenant son rectangle par `DwmGetWindowAttribute(…, 9, …)`.
 	- Ces fenêtres s'ouvrent sur l'écran de Lionel : limiter le nombre de lancements.
+	- Infobulles : les déclencher par `event_generate("<Enter>")` puis `("<Motion>")` avec `x`, `y`, `rootx`, `rooty`, sans déplacer le vrai pointeur. Placer la fenêtre **loin du vrai pointeur** (`GetCursorPos`) : sinon ses événements réels se mêlent aux simulés. Écran verrouillé : `ImageGrab` capture l'écran de verrouillage.
 
 ## Points à traiter
 
 - Ajouter des tests et compléter le `README.md` (installation, usage, captures).
 - Supprimer la constante `MAX_FACES_SHOWN` (inutilisée depuis la pagination) et le fichier obsolète `~/.face_tagger/faces_cache.pkl` (ancien cache de la v1).
 - Resynchroniser `version.txt` avec le tag ; afficher dans une `messagebox` les erreurs de démarrage en mode fenêtré.
+- Retirer U+FE0F des textes des widgets (blanc après certains emojis, voir « Infobulles ») et compléter `EMOJI_PATTERN` (ℹ️ notamment, déjà employé dans les messages).
 - Tester les vrais modèles sur un petit dossier de photos (copies), avec la sauvegarde `*_original` activée.

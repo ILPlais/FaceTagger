@@ -162,7 +162,7 @@ FaceTagger est gratuit et le restera. Si l'outil vous rend service, vous pouvez 
 | ₿ Bitcoin | Ξ Ethereum | 💳 PayPal |
 |:---:|:---:|:---:|
 | <img src=".github/funding/bitcoin.png" alt="QR-code Bitcoin" width="160"> | <img src=".github/funding/ethereum.png" alt="QR-code Ethereum" width="160"> | <img src=".github/funding/paypal.png" alt="QR-code PayPal" width="160"> |
-| `bc1qw7rgvc0rkkz032pxe57euwugkgrs5kndtwfrs3` | `0x771B29bc8dCCdbFa33e0Ad65ec507bdF3fcf05A5` | [paypal.me/LionelPlais](https://paypal.me/LionelPlais) |
+| `bc1qd8875ezcdzmncl2pe3cek2ymupje5fhddynw36` | `0x771B29bc8dCCdbFa33e0Ad65ec507bdF3fcf05A5` | [paypal.me/LionelPlais](https://paypal.me/LionelPlais) |
 
 Merci ! 🙏
 

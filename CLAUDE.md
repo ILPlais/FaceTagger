@@ -63,7 +63,7 @@ python restore_originals.py --directory "D:\Photos" --action delete --yes
 	- GitHub lit le workflow **dans le commit du tag** : les tags `v1.0.0` et `v1.0.4` (posés sur `04d0e7c`) ont l'ancien déclencheur. Pour les recompiler, utiliser le lancement manuel.
 	- Le dépôt est **privé** : l'API GitHub répond 404 sans authentification, et `gh` n'est pas installé sur le poste.
 - Les trois fichiers `.py` restent **dans le même dossier** : PyInstaller embarque `face_database` et `restore_originals` grâce aux imports (vérifié par un build réel).
-- `version.txt` (infos de version Windows) est à **1.0.0.0** alors que le dernier tag est **v1.0.4** : à resynchroniser à chaque publication.
+- `version.txt` (infos de version Windows) est à **1.1.0.0**, comme le dernier tag **v1.1.0** : à resynchroniser à chaque publication, **avant** de poser le tag (le workflow compile le commit du tag).
 - En mode fenêtré (`--noconsole`), `sys.stdout` et `sys.stderr` valent `None` : `print()` reste sans effet (pas de plantage), mais les `sys.exit("message")` du démarrage sont invisibles. Amélioration possible : les afficher dans une `messagebox`.
 - Icône : `iconbitmap(default = …)` (les boîtes de dialogue en héritent) ; avec un `.ico`, l'appel lève une `TclError` sous Linux/macOS et est donc protégé par `try/except`. `resource_path()` lit `sys._MEIPASS` sous PyInstaller, sinon le **dossier du script** : l'ancienne version cherchait dans le dossier courant, et une fois lancée hors du dépôt, l'application montrait la plume de Tk dans la barre des tâches (vérifié par capture d'écran).
 - Barre des tâches de Windows : `set_windows_app_id()` déclare l'`AppUserModelID` `ILPlais.FaceTagger` avant la création de la fenêtre. Sinon, lancée par `python face_tagger.py`, la fenêtre est rattachée à python.exe, et en mode « regrouper les boutons » Windows affiche l'icône de Python (comportement documenté, non reproduit : la barre des tâches de Lionel ne regroupe jamais).
@@ -163,6 +163,6 @@ Pour en ajouter (pytest, dossier `tests/`) :
 
 - Ajouter des tests et compléter le `README.md` (installation, usage, captures).
 - Supprimer la constante `MAX_FACES_SHOWN` (inutilisée depuis la pagination) et le fichier obsolète `~/.face_tagger/faces_cache.pkl` (ancien cache de la v1).
-- Resynchroniser `version.txt` avec le tag ; afficher dans une `messagebox` les erreurs de démarrage en mode fenêtré.
+- Afficher dans une `messagebox` les erreurs de démarrage en mode fenêtré.
 - Retirer U+FE0F des textes des widgets (blanc après certains emojis, voir « Infobulles ») et compléter `EMOJI_PATTERN` (ℹ️ notamment, déjà employé dans les messages).
 - Tester les vrais modèles sur un petit dossier de photos (copies), avec la sauvegarde `*_original` activée.

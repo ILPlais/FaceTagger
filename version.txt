@@ -5,9 +5,9 @@
 VSVersionInfo(
 	ffi=FixedFileInfo(
 		# Le numéro de version du fichier (tuple de 4 entiers)
-		filevers=(1, 0, 0, 0),
+		filevers=(1, 1, 0, 0),
 		# Le numéro de version du produit (tuple de 4 entiers)
-		prodvers=(1, 0, 0, 0),
+		prodvers=(1, 1, 0, 0),
 		# Masque des attributs
 		mask=0x3f,
 		# Indicateurs (0x0 = normal, 0x1 = debug, etc.)
@@ -28,12 +28,12 @@ VSVersionInfo(
 					[
 						StringStruct('CompanyName', 'ILP-Web Network'),
 						StringStruct('FileDescription', 'Utilitaire de reconnaissance faciale pour photos'),
-						StringStruct('FileVersion', '1.0.0.0'),
+						StringStruct('FileVersion', '1.1.0.0'),
 						StringStruct('InternalName', 'face_tagger'),
 						StringStruct('LegalCopyright', 'Copyright © 2026 PLAIS Lionel. MIT License.'),
 						StringStruct('OriginalFilename', 'face_tagger.exe'),
 						StringStruct('ProductName', 'Face Tagger — visages par personne'),
-						StringStruct('ProductVersion', '1.0.0.0'),
+						StringStruct('ProductVersion', '1.1.0.0'),
 					]
 				)
 			]

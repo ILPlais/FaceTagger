@@ -1,0 +1,7 @@
+# Moyens de financement affichés par le bouton « Sponsor » de GitHub.
+# GitHub n'accepte que des liens : les adresses Bitcoin et Ethereum, avec
+# leurs QR-codes, sont donc présentées dans la section « Soutenir le projet »
+# du README, vers laquelle pointe le second lien.
+custom:
+  - https://paypal.me/LionelPlais
+  - https://github.com/ILPlais/FaceTagger#-soutenir-le-projet

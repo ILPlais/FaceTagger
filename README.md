@@ -155,6 +155,17 @@ L'exécutable est créé dans `dist/`. Les trois fichiers `.py` doivent rester d
 | `version.txt` | Informations de version de l'exécutable Windows |
 | `face_tagger.ico`, `.png`, `.svg` | Icône |
 
+## 💖 Soutenir le projet
+
+FaceTagger est gratuit et le restera. Si l'outil vous rend service, vous pouvez soutenir son développement :
+
+| ₿ Bitcoin | Ξ Ethereum | 💳 PayPal |
+|:---:|:---:|:---:|
+| <img src=".github/funding/bitcoin.png" alt="QR-code Bitcoin" width="160"> | <img src=".github/funding/ethereum.png" alt="QR-code Ethereum" width="160"> | <img src=".github/funding/paypal.png" alt="QR-code PayPal" width="160"> |
+| `bc1qw7rgvc0rkkz032pxe57euwugkgrs5kndtwfrs3` | `0x771B29bc8dCCdbFa33e0Ad65ec507bdF3fcf05A5` | [paypal.me/LionelPlais](https://paypal.me/LionelPlais) |
+
+Merci ! 🙏
+
 ## 📜 Licence
 
 Distribué sous licence [MIT](LICENSE) — © PLAIS Lionel.

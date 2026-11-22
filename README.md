@@ -8,11 +8,13 @@ FaceTagger parcourt un dossier de photos (sous-dossiers compris), détecte les v
 
 ## ✨ Fonctionnalités
 
-- 🔍 **Détection et reconnaissance locales** : deux petits modèles ONNX ([YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) et [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface)) exécutés par OpenCV, sans GPU ni service en ligne : les photos ne quittent jamais l'ordinateur.
+- 🔍 **Détection et reconnaissance locales** avec [DeepFace](https://github.com/serengil/deepface) : détecteur RetinaFace et modèle ArcFace par défaut, exécutés par onnxruntime, sans TensorFlow, sans GPU ni service en ligne : les photos ne quittent jamais l'ordinateur. D'autres détecteurs (YuNet, plus rapide) et modèles (Facenet512, SFace…) se choisissent en ligne de commande.
 - 👥 **Regroupement par personne** selon la similarité des visages, avec un seuil réglable.
-- 🏷️ **Reprise des noms existants** : régions de visages (MWG ou Microsoft), `PersonInImage` et, au choix, mots-clés.
-- 🧩 **Nommage rapide des inconnus**, des plus fréquents aux plus rares ; renommage, fusion de groupes, déplacement ou mise à l'écart d'un visage.
-- 💾 **Écriture des noms** dans les métadonnées, suivie d'une relecture de chaque photo pour vérifier.
+- 🏷️ **Reprise des noms existants** : régions de visages (MWG ou Microsoft), `PersonInImage` et, au choix, mots-clés.
+- 🧩 **Nommage rapide des inconnus**, des plus fréquents aux plus rares ; renommage et fusion de groupes.
+- ☑️ **Sélection de plusieurs vignettes** (Ctrl ou Maj + clic, Ctrl + A) pour les déplacer vers une autre personne, les détacher dans un nouveau groupe ou les écarter d'un coup.
+- ✅ **Validation personne par personne** : le nom de la personne sélectionnée est écrit dans celles de ses photos où il manque encore, puis chaque photo est relue pour vérifier. La colonne « Métadonnées » indique les personnes déjà à jour.
+- 🖼️ **Analyse d'un dossier entier ou de quelques photos** choisies une à une.
 - 📦 **Sauvegarde** de la version d'origine de chaque photo modifiée (`*_original`) et **restauration** en un clic.
 - ⚡ **Analyse incrémentale** : une base SQLite mémorise visages, vignettes et étiquettes ; une photo inchangée n'est ni ré-analysée ni relue.
 - 🌓 Thème clair ou sombre (suit Windows), prise en charge des écrans à haute résolution, infobulles sur chaque commande.
@@ -42,7 +44,11 @@ python -m venv .venv
 pip install --requirement requirements.txt
 ```
 
-> ⚠️ N'installez pas `opencv-python` et `opencv-python-headless` dans le même environnement : ils entrent en conflit.
+> ⚠️ DeepFace installe `opencv-contrib-python-headless`. Si l'environnement contient déjà `opencv-python` (version précédente de FaceTagger), désinstallez-le d'abord : les deux paquets entrent en conflit.
+>
+> ```powershell
+> pip uninstall --yes opencv-python
+> ```
 
 ### ExifTool
 
@@ -67,7 +73,7 @@ S'il n'est pas dans le `PATH`, indiquez son chemin avec l'option `--exiftool`.
 
 ### Modèles de reconnaissance
 
-Au premier lancement, les modèles ONNX (environ 37 Mo) sont téléchargés automatiquement dans `~/.face_tagger/models` (sous Windows : `%USERPROFILE%\.face_tagger\models`).
+Au premier lancement, DeepFace télécharge les poids de ses modèles (environ 255 Mo pour RetinaFace et ArcFace) dans `~/.face_tagger/.deepface/weights` (sous Windows : `%USERPROFILE%\.face_tagger\.deepface\weights`).
 
 ## 🚀 Utilisation
 
@@ -78,8 +84,10 @@ python face_tagger.py --directory "D:\Photos"
 1. 📁 Choisissez le dossier de photos, puis cliquez sur **🔍 Analyser**. La première analyse d'un grand dossier peut être longue ; les suivantes ne traitent que les photos nouvelles ou modifiées.
 2. 👥 La liste de gauche présente les personnes : celles déjà nommées dans les métadonnées, puis les inconnues. Les visages de la personne sélectionnée s'affichent à droite, page par page.
 3. ✏️ Nommez les personnes : **Renommer…** (ou double-clic), **🧩 Nommer les inconnus…** pour les passer en revue une à une. Donner un nom déjà utilisé réunit les deux groupes.
-4. 🧹 Corrigez au besoin : **🔗 Fusionner** plusieurs groupes, **🙈 Ignorer** les inconnus de passage, et clic droit sur un visage pour le déplacer, le détacher ou l'écarter. Le curseur **🎚️ Seuil de similarité** puis **🔄 Regrouper à nouveau** rendent les groupes plus larges (seuil bas) ou plus stricts (seuil haut).
-5. 💾 Cochez les métadonnées à écrire, puis cliquez sur **Écrire dans les métadonnées**.
+4. 🧹 Corrigez au besoin : **🔗 Fusionner** plusieurs groupes, **🙈 Ignorer** les inconnus de passage. Dans les vignettes, sélectionnez les visages mal attribués (clic, **Ctrl + clic** pour en ajouter, **Maj + clic** pour une plage, **Ctrl + A** pour tous), puis **Déplacer…**, **Détacher** ou **Écarter** (aussi par clic droit). Le curseur **🎚️ Seuil de similarité** puis **🔄 Regrouper à nouveau** rendent les groupes plus larges (seuil bas) ou plus stricts (seuil haut).
+5. ✅ Cochez les métadonnées à écrire, puis validez les personnes **une à une** : sélectionnez-en une, vérifiez ses vignettes et cliquez sur **Valider la personne**. Seules les photos où son nom manque encore sont modifiées. **Tout écrire…** traite toutes les personnes nommées d'un coup, sans cette vérification.
+
+Pour n'analyser que quelques photos, cliquez sur **🖼 Photos…** au lieu de choisir un dossier.
 
 > 💡 Travaillez d'abord sur une **copie** de quelques photos pour vous familiariser avec l'outil, en laissant la sauvegarde `*_original` activée.
 
@@ -102,7 +110,9 @@ Les étiquettes existantes sont conservées ; une personne renommée remplace se
 | `--database` | `<data-directory>/face_tagger.sqlite` | Fichier de la base SQLite |
 | `--page-size` | `100` | Nombre de vignettes par page |
 | `--exiftool` | `exiftool` | Chemin ou nom de l'exécutable ExifTool |
-| `--threshold` | `0.40` | Seuil de similarité (de 0.20 à 0.70) |
+| `--model` | `ArcFace` | Modèle de reconnaissance de DeepFace : `ArcFace`, `Facenet512`, `GhostFaceNet`, `SFace`, `Facenet` ou `VGG-Face` |
+| `--detector` | `retinaface` | Détecteur de visages : `retinaface`, `yunet` (environ dix fois plus rapide), `centerface`, `mtcnn`, `ssd` ou `opencv` |
+| `--threshold` | selon le modèle (`0.32` pour ArcFace) | Seuil de similarité (de 0.20 à 0.80) |
 | `--max-image-size` | `2000` | Taille maximale (pixels) des photos pour la détection |
 | `--min-face-size` | `40` | Taille minimale (pixels) d'un visage retenu |
 | `--detection-score` | `0.80` | Score minimal de détection d'un visage (0 à 1) |
@@ -110,7 +120,9 @@ Les étiquettes existantes sont conservées ; une personne renommée remplace se
 | `--no-emoji` | | Désactiver les emojis (si Tk plante à leur affichage) |
 | `--theme` | `auto` | Thème : `auto` (celui du système), `light` ou `dark` |
 
-Changer les paramètres de détection (`--max-image-size`, `--min-face-size`, `--detection-score`) entraîne une nouvelle analyse des visages ; les noms lus restent valables.
+Changer de modèle ou de détecteur, ou les paramètres de détection (`--max-image-size`, `--min-face-size`, `--detection-score`), entraîne une nouvelle analyse des visages ; les noms lus restent valables. Chaque modèle a sa propre échelle de ressemblance : sans `--threshold`, le seuil conseillé par DeepFace pour ce modèle est utilisé.
+
+> ⏱️ Sur le processeur, RetinaFace prend environ 3,5 s par photo, YuNet environ 0,35 s. Pour une grande photothèque, `--detector yunet` accélère beaucoup la première analyse.
 
 ## ♻️ Sauvegardes et restauration
 
@@ -129,7 +141,7 @@ python restore_originals.py --directory "D:\Photos" --action delete --yes
 
 Tout est rangé dans `~/.face_tagger` (modifiable par `--data-directory`) :
 
-- `models/` : les modèles ONNX ;
+- `.deepface/weights/` : les poids des modèles de DeepFace ;
 - `face_tagger.sqlite` : visages, empreintes, vignettes, étiquettes lues et historique des modifications.
 
 Supprimer ce dossier remet l'application à zéro, sans toucher aux photos.
@@ -140,8 +152,10 @@ Les exécutables sont compilés par [GitHub Actions](.github/workflows/build.yml
 
 ```powershell
 pip install pyinstaller
-pyinstaller --onefile --noconsole --icon=face_tagger.ico --version-file=version.txt --add-data "face_tagger.ico;." face_tagger.py
+pyinstaller --onefile --noconsole --icon=face_tagger.ico --version-file=version.txt --add-data "face_tagger.ico;." --collect-submodules deepface.models --collect-submodules deepface.modules --recursive-copy-metadata deepface face_tagger.py
 ```
+
+Les options `--collect-submodules` et `--recursive-copy-metadata` sont nécessaires : DeepFace charge ses modèles par leur nom, ce que PyInstaller ne détecte pas seul.
 
 L'exécutable est créé dans `dist/`. Les trois fichiers `.py` doivent rester dans le même dossier.
 
@@ -170,4 +184,4 @@ Merci ! 🙏
 
 Distribué sous licence [MIT](LICENSE) — © PLAIS Lionel.
 
-Modèles YuNet et SFace : [OpenCV Zoo](https://github.com/opencv/opencv_zoo). Métadonnées : [ExifTool](https://exiftool.org/) de Phil Harvey.
+Détection et reconnaissance des visages : [DeepFace](https://github.com/serengil/deepface) de Sefik Ilkin Serengil (licence MIT). Métadonnées : [ExifTool](https://exiftool.org/) de Phil Harvey.

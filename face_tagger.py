@@ -4,33 +4,36 @@
 face_tagger.py — Regroupe les visages d'une photothèque par personne et inscrit
 les noms dans les métadonnées des photos.
 
-	1. Parcours récursif d'un dossier de photos.
-	2. Détection des visages (YuNet) et calcul d'une empreinte par visage (SFace) :
-		deux petits modèles ONNX exécutés par OpenCV (pas de dlib, pas de GPU requis).
+	1. Parcours récursif d'un dossier de photos, ou analyse de quelques photos choisies une à une.
+	2. Détection des visages et calcul d'une empreinte par visage avec DeepFace : détecteur
+		RetinaFace et modèle de reconnaissance ArcFace par défaut (--detector, --model), exécutés
+		par onnxruntime (ni TensorFlow, ni GPU requis).
 	3. Regroupement des visages par personne (similarité cosinus).
 	4. Les étiquettes déjà présentes dans les photos (régions de visages MWG / Microsoft,
 		PersonInImage, éventuellement mots-clés) servent à nommer automatiquement les groupes.
 	5. Les personnes non reconnues peuvent être nommées à la main dans une boîte de dialogue.
-	6. Écriture des noms via ExifTool : XMP-iptcExt:PersonInImage, régions de visages
-		XMP-mwg-rs, mots-clés XMP-dc:Subject et EXIF XPKeywords (visible dans l'Explorateur Windows),
-		suivie d'une relecture pour vérifier que les noms ont bien été écrits.
-	7. Une base SQLite (face_database.py) mémorise visages, vignettes, étiquettes lues et historique
+	6. Les vignettes d'une personne se sélectionnent à plusieurs (Ctrl / Maj + clic) pour être
+		déplacées, détachées ou écartées d'un coup.
+	7. Les noms sont validés personne par personne : ExifTool écrit XMP-iptcExt:PersonInImage, les
+		régions de visages XMP-mwg-rs, les mots-clés XMP-dc:Subject et EXIF XPKeywords (visible dans
+		l'Explorateur Windows), puis relit chaque photo pour vérifier que les noms y sont.
+	8. Une base SQLite (face_database.py) mémorise visages, vignettes, étiquettes lues et historique
 		des modifications : une photo inchangée n'est jamais ré-analysée ni relue.
-	8. Les visages d'une personne sont affichés page par page (seules les vignettes de la page
+	9. Les visages d'une personne sont affichés page par page (seules les vignettes de la page
 		courante sont chargées en mémoire).
-	9. Les sauvegardes *_original d'ExifTool se restaurent d'un coup (bouton, ou restore_originals.py).
-	10. L'interface suit le mode sombre de Windows (ou --theme) et reste nette sur les écrans à haute résolution.
-	11. Une infobulle explique chaque commande, réglage et colonne de l'interface.
+	10. Les sauvegardes *_original d'ExifTool se restaurent d'un coup (bouton, ou restore_originals.py).
+	11. L'interface suit le mode sombre de Windows (ou --theme) et reste nette sur les écrans à haute résolution.
+	12. Une infobulle explique chaque commande, réglage et colonne de l'interface.
 
 Fichiers à placer dans le même dossier : face_tagger.py, face_database.py, restore_originals.py
 
-Dépendances :
-	pip install opencv-python pillow numpy      (+ pillow-heif pour les HEIC, optionnel)
+Dépendances :
+	pip install --requirement requirements.txt   (deepface, pillow, numpy, pillow-heif pour les HEIC)
 	ExifTool   (Fedora : sudo dnf install perl-Image-ExifTool)
 	Tkinter    (Fedora : sudo dnf install python3-tkinter)
 
-Exemple :
-	python face_tagger.py --directory ~/Images --threshold 0.40
+Exemple :
+	python face_tagger.py --directory ~/Images --model ArcFace --detector retinaface
 """
 
 from __future__ import annotations
@@ -49,29 +52,31 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
-import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, Optional
+from types import ModuleType
+from typing import Callable, Iterable, Optional
 
 if sys.platform == "win32":
 	# Lecture du thème de Windows (clair ou sombre)
 	import winreg
 
+# DeepFace n'est pas importé ici mais à la première analyse (voir load_deepface) : son import charge onnxruntime
+# et OpenCV, ce qui retarderait de plusieurs secondes l'ouverture de la fenêtre, même pour une photothèque déjà
+# analysée qui n'en a pas besoin.
 try:
-	import cv2
 	import numpy as np
 	from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 except ImportError as error:
-	sys.exit(f"❌ Dépendance manquante : {error}\n👉 Installez-la avec : pip install opencv-python pillow numpy")
+	sys.exit(f"❌ Dépendance manquante : {error}\n👉 Installez-la avec : pip install --requirement requirements.txt")
 
 # Prise en charge optionnelle des HEIC/HEIF (photos d'iPhone) si pillow-heif est installé
 try:
 	import pillow_heif
 	pillow_heif.register_heif_opener()
-	HEIF_AVAILABLE = True
+	HEIF_AVAILABLE: bool = True
 except ImportError:
 	HEIF_AVAILABLE = False
 
@@ -88,32 +93,51 @@ except ImportError as error:
 # ======================================================================================
 
 # Extensions d'images analysées
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
+IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 if HEIF_AVAILABLE:
 	IMAGE_EXTENSIONS |= {".heic", ".heif"}
 
-# Modèles ONNX du « zoo » OpenCV, téléchargés automatiquement au premier lancement
-MODEL_URLS = {
-	"face_detection_yunet_2023mar.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
-	"face_recognition_sface_2021dec.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+# Modèles de reconnaissance de DeepFace proposés, avec leur seuil de similarité cosinus par défaut. Chaque modèle
+# a sa propre échelle de ressemblance : ces seuils sont ceux de DeepFace (deepface/config/threshold.py, exprimés
+# en distance cosinus), convertis en similarité (1 − distance). Tous s'exécutent avec onnxruntime.
+RECOGNITION_MODELS: dict[str, float] = {
+	"ArcFace": 0.32,            # 512 dimensions : le meilleur compromis précision / vitesse (choix par défaut)
+	"Facenet512": 0.70,         # 512 dimensions : très précis, seuil élevé
+	"GhostFaceNet": 0.35,       # 512 dimensions : léger
+	"SFace": 0.41,              # 128 dimensions : le modèle de l'ancienne version (OpenCV)
+	"Facenet": 0.60,            # 128 dimensions
+	"VGG-Face": 0.32,           # 4096 dimensions : lent et volumineux
 }
-# En dessous de cette taille, le fichier est un pointeur Git LFS ou un téléchargement tronqué
-MODEL_MIN_SIZE = 100_000
+DEFAULT_MODEL: str = "ArcFace"
 
-THUMBNAIL_SIZE = 96          # Côté (en pixels) des vignettes de visages
-TREE_ROW_HEIGHT = 44         # Hauteur des lignes de la liste des personnes
-MAX_FACES_SHOWN = 150        # Nombre maximal de vignettes affichées pour une personne
-ICON_CACHE_SIZE = 4000       # Nombre maximal d'icônes de la liste des personnes gardées en mémoire
-TOOLTIP_DELAY = 500          # Délai (en millisecondes) avant l'apparition d'une infobulle, celui de Windows
-TOOLTIP_WIDTH = 380          # Largeur maximale (en pixels, écran à 100 %) du texte d'une infobulle
-REGION_MATCH_IOU = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
-EXIFTOOL_BATCH = 25          # Nombre de photos modifiées par appel à ExifTool
+# Détecteurs de visages de DeepFace proposés. RetinaFace repère bien les visages petits, de profil ou dans la
+# pénombre, mais il est lent : environ 3,5 s par photo sur le processeur, contre 0,35 s pour YuNet (mesuré sur
+# des photos de 2000 pixels, mêmes visages trouvés).
+DETECTOR_BACKENDS: tuple[str, ...] = ("retinaface", "yunet", "centerface", "mtcnn", "ssd", "opencv")
+DEFAULT_DETECTOR: str = "retinaface"
+
+# Moteur d'exécution des réseaux de neurones imposé à DeepFace (s'il n'est pas déjà fixé par la variable
+# d'environnement) : onnxruntime est installé avec DeepFace, alors que TensorFlow ou PyTorch, s'ils sont présents
+# sur le poste, seraient choisis en priorité et donneraient des empreintes légèrement différentes.
+DEEPFACE_ENGINE: str = "onnx"
+
+# Bornes du curseur de similarité : assez larges pour couvrir les seuils de tous les modèles ci-dessus
+THRESHOLD_MIN: float = 0.20
+THRESHOLD_MAX: float = 0.80
+
+THUMBNAIL_SIZE: int = 96          # Côté (en pixels) des vignettes de visages
+TREE_ROW_HEIGHT: int = 44         # Hauteur des lignes de la liste des personnes
+ICON_CACHE_SIZE: int = 4000       # Nombre maximal d'icônes de la liste des personnes gardées en mémoire
+TOOLTIP_DELAY: int = 500          # Délai (en millisecondes) avant l'apparition d'une infobulle, celui de Windows
+TOOLTIP_WIDTH: int = 380          # Largeur maximale (en pixels, écran à 100 %) du texte d'une infobulle
+REGION_MATCH_IOU: float = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
+EXIFTOOL_BATCH: int = 25          # Nombre de photos modifiées par appel à ExifTool
 
 # Identifiant de l'application pour la barre des tâches de Windows (voir set_windows_app_id)
-APP_USER_MODEL_ID = "ILPlais.FaceTagger"
+APP_USER_MODEL_ID: str = "ILPlais.FaceTagger"
 
 # Couleurs du thème sombre (proches de celles de Windows 11)
-DARK_COLORS = {
+DARK_COLORS: dict[str, str] = {
 	"background": "#202020",        # Fond des fenêtres
 	"surface": "#2b2b2b",           # Champs de saisie, listes et journal
 	"button": "#333333",            # Boutons, en-têtes de colonnes, ascenseurs
@@ -131,7 +155,7 @@ DARK_COLORS = {
 }
 
 # Couleurs des infobulles pour chaque thème (le thème sombre reprend les teintes de DARK_COLORS)
-TOOLTIP_COLORS = {
+TOOLTIP_COLORS: dict[str, dict[str, str]] = {
 	"light": {
 		"background": "#ffffff",
 		"text": "#1a1a1a",
@@ -144,14 +168,26 @@ TOOLTIP_COLORS = {
 	},
 }
 
+# Mise en évidence des vignettes sélectionnées, pour chaque thème (bleu clair de l'Explorateur, bleu de Windows)
+SELECTION_COLORS: dict[str, dict[str, str]] = {
+	"light": {
+		"background": "#cce4f7",
+		"text": "#000000"
+	},
+	"dark": {
+		"background": DARK_COLORS["selection"],
+		"text": DARK_COLORS["selection_text"]
+	},
+}
+
 # Réglages globaux : emojis et thème viennent de la ligne de commande, l'échelle de l'écran est mesurée au démarrage
-SETTINGS = {"emoji": True, "dark": False, "scale": 1.0}
+SETTINGS: dict[str, bool | float] = {"emoji": True, "dark": False, "scale": 1.0}
 
 # Caractères considérés comme des emojis (utile pour l'option --no-emoji)
-EMOJI_PATTERN = re.compile("[\U0001F000-\U0001FFFF\u2190-\u21FF\u23E9-\u23FF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
+EMOJI_PATTERN: re.Pattern[str] = re.compile("[\U0001F000-\U0001FFFF\u2190-\u21FF\u23E9-\u23FF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
 
 # Étiquettes ExifTool lues dans chaque photo
-TAGS_TO_READ = [
+TAGS_TO_READ: list[str] = [
 	"-XMP-mwg-rs:RegionInfo",        # Régions de visages (norme MWG : Lightroom, digiKam, Picasa…)
 	"-XMP-MP:RegionInfoMP",          # Régions de visages « Microsoft Photo »
 	"-XMP-iptcExt:PersonInImage",    # Liste de personnes présentes (sans position)
@@ -171,7 +207,7 @@ def emoji(text: str) -> str:
 		return text
 	return EMOJI_PATTERN.sub("", text).strip()
 
-def resource_path(relative_path):
+def resource_path(relative_path: str) -> str:
 	"""Obtient le chemin absolu vers la ressource, fonctionne pour le dev et PyInstaller."""
 	try:
 		# PyInstaller crée un dossier temporaire et stocke le chemin dans _MEIPASS
@@ -260,7 +296,7 @@ def name_key(name: str) -> str:
 	return normalize_name(name).casefold()
 
 
-def merge_unique(*lists) -> list[str]:
+def merge_unique(*lists: Iterable[str]) -> list[str]:
 	"""Fusionne des listes de noms sans doublon (insensible à la casse), en gardant l'ordre."""
 	seen: set[str] = set()
 	result: list[str] = []
@@ -273,7 +309,7 @@ def merge_unique(*lists) -> list[str]:
 	return result
 
 
-def as_list(value) -> list[str]:
+def as_list(value: object) -> list[str]:
 	"""Convertit une valeur renvoyée par ExifTool (rien, texte, nombre ou liste) en liste de textes."""
 	if value is None:
 		return []
@@ -313,7 +349,7 @@ def list_photos(directory: str) -> list[str]:
 	return photos
 
 
-def load_font(size: int):
+def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 	"""Charge une police lisible pour annoter les photos (police par défaut en dernier recours)."""
 	for font_name in ("DejaVuSans.ttf", "arial.ttf", "Arial.ttf"):
 		try:
@@ -346,29 +382,28 @@ def decode_thumbnail(data: Optional[bytes]) -> Image.Image:
 	return Image.open(io.BytesIO(data)).convert("RGB")
 
 
-def ensure_models(models_directory: Path, log: Callable[[str], None]) -> tuple[Path, Path]:
-	"""Vérifie la présence des deux modèles ONNX et les télécharge si besoin."""
-	models_directory.mkdir(parents = True, exist_ok = True)
-	paths: list[Path] = []
-	for file_name, url in MODEL_URLS.items():
-		target = models_directory / file_name
-		if not target.exists() or target.stat().st_size < MODEL_MIN_SIZE:
-			log(f"⬇️ Téléchargement du modèle {file_name}…")
-			partial = target.with_suffix(".part")
-			try:
-				urllib.request.urlretrieve(url, partial)
-				if partial.stat().st_size < MODEL_MIN_SIZE:
-					raise RuntimeError("fichier reçu trop petit (pointeur Git LFS ?)")
-				partial.replace(target)
-			except Exception as error:
-				partial.unlink(missing_ok = True)
-				raise RuntimeError(
-					f"Téléchargement impossible de {file_name} ({error}).\n"
-					f"👉 Téléchargez-le manuellement depuis {url}\n"
-					f"   puis placez-le dans {models_directory}"
-				) from error
-		paths.append(target)
-	return paths[0], paths[1]
+def load_deepface(data_directory: Path) -> ModuleType:
+	"""Importe DeepFace à la première analyse et lui indique où ranger ses modèles.
+
+	DeepFace télécharge lui-même les poids de chaque réseau à sa première utilisation (quelques centaines de Mo),
+	ici dans <data_directory>/.deepface/weights plutôt que dans le dossier personnel. Ses variables d'environnement
+	doivent être fixées AVANT l'import, car il les lit à ce moment-là ; une valeur déjà définie par l'utilisateur
+	est respectée.
+	"""
+	# Une variable définie mais vide compte comme absente : DeepFace rangerait sinon ses modèles dans un dossier
+	# « .deepface » relatif au dossier courant
+	if not os.environ.get("DEEPFACE_HOME", "").strip():
+		os.environ["DEEPFACE_HOME"] = str(data_directory)
+	if not os.environ.get("DEEPFACE_BACKEND_ENGINE", "").strip():
+		os.environ["DEEPFACE_BACKEND_ENGINE"] = DEEPFACE_ENGINE
+	try:
+		from deepface import DeepFace
+	except ImportError as error:
+		raise RuntimeError(
+			f"DeepFace est introuvable ({error}).\n"
+			"👉 Installez-le avec : pip install --requirement requirements.txt"
+		) from error
+	return DeepFace
 
 
 # ======================================================================================
@@ -447,11 +482,13 @@ def parse_photo_tags(entry: dict) -> PhotoTags:
 class ExifTool:
 	"""Petit adaptateur autour de l'exécutable ExifTool."""
 
-	def __init__(self, executable: str = "exiftool"):
-		self.path = shutil.which(executable)
+	def __init__(self, executable: str = "exiftool") -> None:
+		"""Cherche l'exécutable `executable` (nom ou chemin) ; `path` vaut None s'il est introuvable."""
+		self.path: Optional[str] = shutil.which(executable)
 
 	@property
 	def available(self) -> bool:
+		"""Vrai si l'exécutable d'ExifTool a été trouvé."""
 		return self.path is not None
 
 	def run(self, options: list[str], files: list[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
@@ -476,7 +513,7 @@ class ExifTool:
 			chunk = photos[start:start + 100]
 			completed = self.run(["-json", "-struct", *TAGS_TO_READ], [Path(p).as_posix() for p in chunk])
 			try:
-				entries = json.loads(completed.stdout.decode("utf-8", errors = "replace") or "[]")
+				entries: list[dict] = json.loads(completed.stdout.decode("utf-8", errors = "replace") or "[]")
 			except json.JSONDecodeError:
 				entries = []
 			for entry in entries:
@@ -508,55 +545,81 @@ class ExifTool:
 
 
 # ======================================================================================
-# Détection et reconnaissance des visages (OpenCV : YuNet + SFace)
+# Détection et reconnaissance des visages (DeepFace)
 # ======================================================================================
 
 class FaceEngine:
-	"""Détecte les visages d'une photo et calcule l'empreinte numérique de chacun."""
+	"""Détecte les visages d'une photo et calcule l'empreinte numérique de chacun, avec DeepFace."""
 
-	def __init__(self, detection_model: Path, recognition_model: Path, max_image_size: int,
-				min_face_size: int, detection_score: float):
-		self.max_image_size = max_image_size
-		self.min_face_size = min_face_size
-		# Arguments positionnels : modèle, configuration, taille d'entrée, seuil de score, seuil NMS, top_k
-		self.detector = cv2.FaceDetectorYN.create(str(detection_model), "", (320, 320), detection_score, 0.3, 5000)
-		self.recognizer = cv2.FaceRecognizerSF.create(str(recognition_model), "")
+	def __init__(self, deepface: ModuleType, model_name: str, detector_backend: str, max_image_size: int,
+				min_face_size: int, detection_score: float) -> None:
+		"""Prépare DeepFace pour l'analyse des photos.
+
+		`deepface` est le module renvoyé par load_deepface() ; `model_name` et `detector_backend` désignent le
+		modèle de reconnaissance et le détecteur. `max_image_size` (pixels) borne la taille de l'image analysée,
+		`min_face_size` (pixels) écarte les visages trop petits et `detection_score` (de 0 à 1) ceux dont la
+		détection est trop incertaine.
+		"""
+		self.deepface: ModuleType = deepface
+		self.model_name: str = model_name
+		self.detector_backend: str = detector_backend
+		self.max_image_size: int = max_image_size
+		self.min_face_size: int = min_face_size
+		self.detection_score: float = detection_score
+		# Les deux réseaux sont construits tout de suite (et leurs poids téléchargés au premier lancement) : une
+		# erreur (pas de connexion, modèle inconnu) arrête ainsi l'analyse avant la première photo, au lieu de faire
+		# échouer les photos une à une. DeepFace les garde ensuite en mémoire pour les appels suivants.
+		deepface.build_model(model_name)
+		deepface.build_model(detector_backend, task = "face_detector")
 
 	def analyse(self, photo: str) -> list[dict]:
-		"""Retourne, pour chaque visage : boîte normalisée, score, empreinte (octets) et vignette JPEG (octets)."""
+		"""Retourne, pour chaque visage : boîte normalisée, score, empreinte (octets) et vignette JPEG (octets)."""
 		with Image.open(photo) as source:
 			# Pour les JPEG, le décodage à échelle réduite accélère beaucoup les gros fichiers
 			source.draft("RGB", (self.max_image_size, self.max_image_size))
-			# On redresse l'image selon l'orientation EXIF : les coordonnées sont celles de l'image affichée
+			# On redresse l'image selon l'orientation EXIF : les coordonnées sont celles de l'image affichée
 			image = ImageOps.exif_transpose(source).convert("RGB")
 
-		# Réduction éventuelle : la détection n'a pas besoin de 24 millions de pixels
+		# Réduction éventuelle : la détection n'a pas besoin de 24 millions de pixels
 		scale = self.max_image_size / max(image.size)
 		if scale < 1:
 			image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
 
-		bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+		# DeepFace attend un tableau NumPy dans l'ordre BGR d'OpenCV (Pillow fournit du RGB). Lui passer l'image
+		# déjà décodée, plutôt que son chemin, évite aussi la lecture par OpenCV, qui échoue sur les chemins
+		# accentués sous Windows et ignore l'orientation EXIF.
+		bgr = np.ascontiguousarray(np.asarray(image)[:, :, ::-1])
 		height, width = bgr.shape[:2]
-		self.detector.setInputSize((width, height))
-		_, detections = self.detector.detect(bgr)
+		detections = self.deepface.represent(
+			img_path = bgr,
+			model_name = self.model_name,
+			detector_backend = self.detector_backend,
+			enforce_detection = False,      # Une photo sans visage n'est pas une erreur
+			align = True,                   # Visage redressé d'après la position des yeux avant le calcul de l'empreinte
+		)
 
 		results: list[dict] = []
-		if detections is None:
-			return results
-		for row in detections:
-			x, y, w, h = (float(value) for value in row[:4])
+		for detection in detections:
+			# Faute de visage, DeepFace renvoie l'image entière avec une confiance nulle : elle est écartée ici
+			confidence = float(detection.get("face_confidence") or 0)
+			if confidence <= 0 or confidence < self.detection_score:
+				continue
+			area = detection.get("facial_area") or {}
+			try:
+				x, y, w, h = (float(area[key]) for key in ("x", "y", "w", "h"))
+			except (KeyError, TypeError, ValueError):
+				continue
 			# Rognage aux limites de l'image
 			x0, y0 = max(0.0, x), max(0.0, y)
 			x1, y1 = min(float(width), x + w), min(float(height), y + h)
 			if min(x1 - x0, y1 - y0) < self.min_face_size:
-				continue  # Visage trop petit : l'empreinte serait peu fiable
-			# Alignement du visage (yeux, nez, bouche) puis calcul de l'empreinte à 128 dimensions
-			aligned = self.recognizer.alignCrop(bgr, row)
-			embedding = self.recognizer.feature(aligned).flatten().astype(np.float32)
+				continue  # Visage trop petit : l'empreinte serait peu fiable
+			# Empreinte de 128 à 4096 dimensions selon le modèle, stockée en flottants de 32 bits
+			embedding = np.asarray(detection["embedding"], dtype = np.float32)
 			results.append({
 				"box": (x0 / width, y0 / height, (x1 - x0) / width, (y1 - y0) / height),
-				"score": float(row[-1]),
-				"embedding": embedding.tobytes(),                 # 128 flottants de 32 bits
+				"score": confidence,
+				"embedding": embedding.tobytes(),
 				"thumbnail": encode_thumbnail(make_thumbnail(image, (x0, y0, x1, y1))),
 			})
 		return results
@@ -590,10 +653,12 @@ class Person:
 
 	@property
 	def photos(self) -> set[str]:
+		"""Photos (chemins) où apparaît la personne, sans doublon."""
 		return {face.photo for face in self.faces}
 
 	@property
 	def display_name(self) -> str:
+		"""Nom affiché : celui de la personne, ou « Inconnu n°… » tant qu'elle n'en a pas."""
 		return self.name or f"Inconnu n°{self.identifier}"
 
 
@@ -620,6 +685,7 @@ def cluster_faces(embeddings: np.ndarray, label_keys: list[Optional[str]], score
 	centroids = np.zeros((count, dimension), dtype = np.float32)
 
 	def new_cluster(label: Optional[str]) -> int:
+		"""Crée un groupe vide, portant l'étiquette `label` (ou aucune), et retourne son rang."""
 		members.append([])
 		sums.append(np.zeros(dimension, dtype = np.float32))
 		cluster_labels.append(label)
@@ -680,11 +746,12 @@ def cluster_faces(embeddings: np.ndarray, label_keys: list[Optional[str]], score
 class Library:
 	"""Ensemble des visages, des personnes et des étiquettes existantes."""
 
-	def __init__(self):
+	def __init__(self) -> None:
+		"""Crée une photothèque vide, remplie ensuite par l'analyse (scan_worker)."""
 		self.faces: list[FaceRecord] = []
 		self.persons: dict[int, Person] = {}
 		self.photo_tags: dict[str, PhotoTags] = {}     # Étiquettes existantes, par photo
-		self._next_id = 1
+		self._next_id: int = 1
 
 	# ---------- Association avec les étiquettes existantes ----------
 
@@ -785,12 +852,17 @@ class Library:
 	# ---------- Édition manuelle ----------
 
 	def new_person(self, name: Optional[str] = None, source: str = "") -> Person:
+		"""Crée une personne, avec un identifiant jamais encore utilisé, et l'ajoute à la photothèque.
+
+		`name` et `source` (« tag » ou « manual ») sont son nom éventuel et l'origine de ce nom.
+		"""
 		person = Person(identifier = self._next_id, name = name, source = source)
 		self.persons[person.identifier] = person
 		self._next_id += 1
 		return person
 
 	def person_by_name(self, name: str) -> Optional[Person]:
+		"""Retourne la personne qui porte ce nom (sans tenir compte de la casse ni des espaces), ou None."""
 		key = name_key(name)
 		for person in self.persons.values():
 			if person.name and name_key(person.name) == key:
@@ -843,6 +915,7 @@ class Library:
 		face.person = None
 
 	def faces_of_photo(self, photo: str) -> list[FaceRecord]:
+		"""Visages d'une photo, sauf ceux écartés par l'utilisateur."""
 		return [face for face in self.faces if face.photo == photo and not face.deleted]
 
 
@@ -865,6 +938,9 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> t
 	}
 
 	def region_box(region: dict) -> Optional[tuple]:
+		"""Rectangle (x, y, largeur, hauteur) d'une région MWG, dont X et Y désignent le centre ;
+		None si sa zone est illisible.
+		"""
 		area = region.get("Area") or {}
 		try:
 			width, height = float(area["W"]), float(area["H"])
@@ -875,7 +951,7 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> t
 	replacements: dict[str, str] = {}
 	for name, face in items:
 		x, y, width, height = face.box
-		match = None
+		match: Optional[dict] = None
 		for region in region_list:
 			box = region_box(region)
 			if box is not None and str(region.get("Type", "Face")) == "Face" and iou(box, face.box) >= REGION_MATCH_IOU:
@@ -906,7 +982,7 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> t
 def check_written(tags: PhotoTags, names: list[str], regions: bool, person: bool, keywords: bool) -> bool:
 	"""Vérifie, d'après les étiquettes relues, que les noms demandés figurent bien dans la photo."""
 	wanted = {name_key(name) for name in names}
-	present = []
+	present: list[set[str]] = []
 	if person:
 		present.append({name_key(name) for name in tags.person_in_image})
 	if keywords:
@@ -914,6 +990,21 @@ def check_written(tags: PhotoTags, names: list[str], regions: bool, person: bool
 	if regions:
 		present.append({name_key(region["name"]) for region in tags.regions})
 	return all(wanted <= found for found in present)
+
+
+def photos_missing_name(library: "Library", person: Person, regions: bool, person_in_image: bool,
+						keywords: bool) -> list[str]:
+	"""Photos de la personne où son nom manque encore, d'après les étiquettes connues et les champs à écrire.
+
+	Sert à la fois à la colonne « Métadonnées » de la liste et à la validation : seules ces photos sont
+	modifiées, les autres (déjà à jour) ne sont pas réécrites inutilement.
+	"""
+	if not person.name:
+		return []
+	return sorted(
+		photo for photo in person.photos
+		if not check_written(library.photo_tags.get(photo, PhotoTags()), [person.name], regions, person_in_image, keywords)
+	)
 
 
 # ======================================================================================
@@ -1111,14 +1202,19 @@ class ToolTip:
 	un clic la masque jusqu'à ce que la souris quitte l'élément (ou passe sur une autre ligne).
 	"""
 
-	def __init__(self, widget: tk.Misc, text: str | Callable[[tk.Event], Optional[str]]):
-		self.widget = widget
-		self.text = text
+	def __init__(self, widget: tk.Misc, text: str | Callable[[tk.Event], Optional[str]]) -> None:
+		"""Attache l'infobulle au widget.
+
+		`text` est le texte fixe, ou une fonction qui reçoit l'événement de la souris et renvoie le texte
+		(None : pas d'infobulle à cet endroit).
+		"""
+		self.widget: tk.Misc = widget
+		self.text: str | Callable[[tk.Event], Optional[str]] = text
 		self.window: Optional[tk.Toplevel] = None
 		self.timer: Optional[str] = None          # Minuteur d'apparition (identifiant renvoyé par after)
 		self.current: Optional[str] = None        # Texte affiché, ou en attente d'affichage
 		self.silenced: Optional[str] = None       # Texte masqué par un clic, jusqu'à la sortie de la souris
-		self.position = (0, 0)                    # Position de la souris à l'écran
+		self.position: tuple[int, int] = (0, 0)                    # Position de la souris à l'écran
 		# add = "+" : les liaisons déjà posées sur le widget (menu contextuel, molette…) sont conservées. Les
 		# clics sont liés bouton par bouton : pour un même widget, Tk n'exécute que la liaison la plus précise, et
 		# un <ButtonPress> générique serait ignoré au profit d'un <Button-3> existant.
@@ -1153,10 +1249,12 @@ class ToolTip:
 			self.timer = self.widget.after(TOOLTIP_DELAY, self.show)
 
 	def on_leave(self, event: tk.Event) -> None:
+		"""La souris quitte le widget : l'infobulle se ferme et pourra réapparaître au retour."""
 		self.silenced = None
 		self.hide()
 
 	def on_press(self, event: tk.Event) -> None:
+		"""Un clic masque l'infobulle jusqu'à ce que la souris quitte l'élément cliqué."""
 		self.silenced = self.text_at(event)
 		self.hide()
 
@@ -1227,17 +1325,23 @@ def photo_caption(photo: str) -> str:
 class NameDialog(tk.Toplevel):
 	"""Boîte de saisie d'un nom, avec liste déroulante des noms déjà connus."""
 
-	def __init__(self, master: tk.Misc, title: str, prompt: str, choices: list[str], initial: str = ""):
+	def __init__(self, master: tk.Misc, title: str, prompt: str, choices: list[str], initial: str = "") -> None:
+		"""Ouvre la boîte (modale) et attend sa fermeture : le nom saisi est alors dans `result`
+		(None si la saisie a été annulée).
+
+		`title` et `prompt` sont le titre et la question, `choices` les noms proposés dans la liste,
+		`initial` le texte de départ.
+		"""
 		super().__init__(master)
 		self.title(emoji(title))
 		self.transient(master)
 		self.resizable(False, False)
 		self.result: Optional[str] = None
-		self.choices = choices
+		self.choices: list[str] = choices
 
 		ttk.Label(self, text = prompt, padding = 8).pack()
-		self.variable = tk.StringVar(value = initial)
-		self.combobox = ttk.Combobox(self, textvariable = self.variable, values = choices, width = 42)
+		self.variable: tk.StringVar = tk.StringVar(value = initial)
+		self.combobox: ttk.Combobox = ttk.Combobox(self, textvariable = self.variable, values = choices, width = 42)
 		self.combobox.pack(padx = 12)
 		# La liste se restreint au fil de la frappe
 		self.combobox.bind("<KeyRelease>", self.filter_choices)
@@ -1259,10 +1363,12 @@ class NameDialog(tk.Toplevel):
 		self.wait_window(self)
 
 	def filter_choices(self, event: tk.Event) -> None:
+		"""Restreint la liste déroulante aux noms qui contiennent le texte tapé."""
 		typed = self.variable.get().casefold()
 		self.combobox.configure(values = [c for c in self.choices if typed in c.casefold()])
 
 	def accept(self) -> None:
+		"""Valide le nom saisi, s'il n'est pas vide, et ferme la boîte."""
 		name = normalize_name(self.variable.get())
 		if name:
 			self.result = name
@@ -1274,7 +1380,10 @@ class NameDialog(tk.Toplevel):
 class PhotoViewer(tk.Toplevel):
 	"""Affiche une photo entière avec le cadre et le nom de chaque visage."""
 
-	def __init__(self, master: tk.Misc, library: Library, face: FaceRecord):
+	def __init__(self, master: tk.Misc, library: Library, face: FaceRecord) -> None:
+		"""Ouvre la photo du visage `face`, avec le cadre et le nom de chaque visage connu de `library`
+		(rouge pour le visage choisi, vert pour les autres).
+		"""
 		super().__init__(master)
 		self.title(emoji(f"🖼️ {face.photo}"))
 		try:
@@ -1301,7 +1410,7 @@ class PhotoViewer(tk.Toplevel):
 			text_box = draw.textbbox((left, bottom + 2), caption, font = font)
 			draw.rectangle(text_box, fill = color)
 			draw.text((left, bottom + 2), caption, fill = "white", font = font)
-		self.photo_image = ImageTk.PhotoImage(image)
+		self.photo_image: ImageTk.PhotoImage = ImageTk.PhotoImage(image)
 		ttk.Label(self, image = self.photo_image).pack()
 		self.bind("<Escape>", lambda event: self.destroy())
 		set_title_bar_theme(self)
@@ -1310,25 +1419,26 @@ class PhotoViewer(tk.Toplevel):
 class UnknownNamesDialog(tk.Toplevel):
 	"""Parcourt les personnes non nommées, une par une, et propose de saisir leur nom."""
 
-	def __init__(self, app: "FaceTaggerApp"):
+	def __init__(self, app: "FaceTaggerApp") -> None:
+		"""Prépare la liste des personnes sans nom de `app` (les plus fréquentes d'abord) et affiche la première."""
 		super().__init__(app)
-		self.app = app
+		self.app: FaceTaggerApp = app
 		self.title(emoji("✍️ Nommer les personnes non reconnues"))
 		self.transient(app)
 		# Les groupes les plus gros d'abord
 		unnamed = [p for p in app.library.persons.values() if not p.name and not p.ignored]
-		self.pending = sorted(unnamed, key = lambda p: -len(p.faces))
-		self.index = 0
+		self.pending: list[Person] = sorted(unnamed, key = lambda p: -len(p.faces))
+		self.index: int = 0
 		self.person: Optional[Person] = None
 		self.images: list[ImageTk.PhotoImage] = []
 
-		self.header = ttk.Label(self, padding = 8, font = ("TkDefaultFont", 11, "bold"))
+		self.header: ttk.Label = ttk.Label(self, padding = 8, font = ("TkDefaultFont", 11, "bold"))
 		self.header.pack()
-		self.gallery = ttk.Frame(self, padding = 8)
+		self.gallery: ttk.Frame = ttk.Frame(self, padding = 8)
 		self.gallery.pack()
 		ttk.Label(self, text = "Nom de cette personne (ou nom déjà utilisé pour fusionner) :").pack()
-		self.variable = tk.StringVar()
-		self.combobox = ttk.Combobox(self, textvariable = self.variable, width = 44)
+		self.variable: tk.StringVar = tk.StringVar()
+		self.combobox: ttk.Combobox = ttk.Combobox(self, textvariable = self.variable, width = 44)
 		self.combobox.pack(padx = 12, pady = 4)
 		self.combobox.bind("<KeyRelease>", self.filter_choices)
 		ToolTip(
@@ -1372,10 +1482,12 @@ class UnknownNamesDialog(tk.Toplevel):
 		self.show_current()
 
 	def known_names(self) -> list[str]:
+		"""Noms déjà donnés, triés sans tenir compte de la casse, pour la liste déroulante."""
 		names = {p.name for p in self.app.library.persons.values() if p.name}
 		return sorted(names, key = str.casefold)
 
 	def filter_choices(self, event: tk.Event) -> None:
+		"""Restreint la liste déroulante aux noms qui contiennent le texte tapé."""
 		typed = self.variable.get().casefold()
 		self.combobox.configure(values = [n for n in self.known_names() if typed in n.casefold()])
 
@@ -1412,6 +1524,7 @@ class UnknownNamesDialog(tk.Toplevel):
 		self.combobox.focus_set()
 
 	def validate(self) -> None:
+		"""Donne le nom saisi à la personne affichée (fusion si ce nom existe déjà), puis passe à la suivante."""
 		name = normalize_name(self.variable.get())
 		if not name or self.person is None:
 			self.bell()
@@ -1426,10 +1539,12 @@ class UnknownNamesDialog(tk.Toplevel):
 		self.show_current()
 
 	def skip(self) -> None:
+		"""Passe à la personne suivante sans nommer celle-ci."""
 		self.index += 1
 		self.show_current()
 
 	def ignore(self) -> None:
+		"""Met la personne affichée de côté (ni proposée, ni écrite), puis passe à la suivante."""
 		if self.person is not None:
 			self.person.ignored = True
 			self.app.refresh_persons()
@@ -1440,13 +1555,16 @@ class UnknownNamesDialog(tk.Toplevel):
 class FaceTaggerApp(tk.Tk):
 	"""Fenêtre principale de l'application."""
 
-	def __init__(self, options: argparse.Namespace):
+	def __init__(self, options: argparse.Namespace) -> None:
+		"""Crée la fenêtre principale d'après les options de la ligne de commande, ouvre la base et
+		vérifie la présence d'ExifTool.
+		"""
 		# Avant super().__init__() : l'identité dans la barre des tâches et la gestion de la résolution de l'écran
 		# doivent précéder la création de la première fenêtre
 		set_windows_app_id()
 		enable_dpi_awareness()
 		super().__init__()
-		self.options = options
+		self.options: argparse.Namespace = options
 		SETTINGS["scale"] = screen_scale(self)
 		if SETTINGS["dark"]:
 			apply_dark_theme(self)
@@ -1466,12 +1584,12 @@ class FaceTaggerApp(tk.Tk):
 		width = min(scaled(1300), area_width - scaled(16))
 		height = min(scaled(820), area_height - title_bar - scaled(16))
 		self.geometry(f"{width}x{height}+{left + (area_width - width) // 2}+{top + (area_height - height - title_bar) // 2}")
-		self.data_directory = Path(options.data_directory).expanduser()
-		self.exiftool = ExifTool(options.exiftool)
-		self.library = Library()
-		self.database = Database(Path(options.database).expanduser())
+		self.data_directory: Path = Path(options.data_directory).expanduser()
+		self.exiftool: ExifTool = ExifTool(options.exiftool)
+		self.library: Library = Library()
+		self.database: Database = Database(Path(options.database).expanduser())
 		self.events: queue.Queue = queue.Queue()          # Messages des threads de travail vers l'interface
-		self.cancel_event = threading.Event()
+		self.cancel_event: threading.Event = threading.Event()
 		self.worker: Optional[threading.Thread] = None
 		self.current_person: Optional[Person] = None
 		# Références aux images Tk (sinon le ramasse-miettes les supprime et elles disparaissent)
@@ -1479,21 +1597,33 @@ class FaceTaggerApp(tk.Tk):
 		self.face_images: list[ImageTk.PhotoImage] = []          # Vignettes de la page affichée
 		self.face_labels: list[ttk.Label] = []
 		self.sorted_faces: list[FaceRecord] = []                 # Visages de la personne affichée, du plus net au moins net
-		self.page = 0
-		self.grid_columns = 0
+		self.page: int = 0
+		self.grid_columns: int = 0
+		self.busy: bool = False                                        # Analyse, écriture ou restauration en cours
+		# Vignettes sélectionnées (plusieurs possibles) parmi les visages de la personne affichée
+		self.selected_faces: set[FaceRecord] = set()
+		self.selection_anchor: Optional[int] = None              # Rang de la dernière vignette cliquée (pour Maj + clic)
+		self.face_index: dict[FaceRecord, int] = {}              # Rang de chaque visage dans sorted_faces
+		self.face_widgets: dict[FaceRecord, ttk.Label] = {}      # Vignettes de la page affichée
+		# Photos choisies une à une (« Photos… ») : elles remplacent le dossier tant que le champ affiche leur libellé
+		self.chosen_photos: list[str] = []
+		self.chosen_label: str = ""
 
 		# Variables liées aux widgets
-		self.directory_var = tk.StringVar(value = options.directory or "")
-		self.threshold_var = tk.DoubleVar(value = options.threshold)
-		self.keywords_var = tk.BooleanVar(value = False)
-		self.write_regions_var = tk.BooleanVar(value = True)
-		self.write_person_var = tk.BooleanVar(value = True)
-		self.write_keywords_var = tk.BooleanVar(value = True)
-		self.backup_var = tk.BooleanVar(value = not options.no_backup)
-		self.page_size_var = tk.StringVar(value = str(options.page_size))
-		self.status_var = tk.StringVar(value = emoji("👋 Choisissez un dossier de photos puis cliquez sur « Analyser »."))
+		self.directory_var: tk.StringVar = tk.StringVar(value = options.directory or "")
+		self.threshold_var: tk.DoubleVar = tk.DoubleVar(value = options.threshold)
+		self.keywords_var: tk.BooleanVar = tk.BooleanVar(value = False)
+		self.write_regions_var: tk.BooleanVar = tk.BooleanVar(value = True)
+		self.write_person_var: tk.BooleanVar = tk.BooleanVar(value = True)
+		self.write_keywords_var: tk.BooleanVar = tk.BooleanVar(value = True)
+		self.backup_var: tk.BooleanVar = tk.BooleanVar(value = not options.no_backup)
+		self.page_size_var: tk.StringVar = tk.StringVar(value = str(options.page_size))
+		self.status_var: tk.StringVar = tk.StringVar(value = emoji("👋 Choisissez un dossier de photos puis cliquez sur « Analyser »."))
 
 		self.build_widgets()
+		# La colonne « Métadonnées » dépend des cases « Écrire » : elle est recalculée à chaque changement
+		for variable in (self.write_regions_var, self.write_person_var, self.write_keywords_var):
+			variable.trace_add("write", lambda *arguments: self.update_person_statuses())
 		strip_widget_emoji(self)
 		set_title_bar_theme(self)
 		self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1504,11 +1634,25 @@ class FaceTaggerApp(tk.Tk):
 		stats = self.database.statistics()
 		self.log(f"🗄️ Base de données : {self.database.path} ({stats['photos']} photo{'s' if stats['photos'] != 1 else ''}, {stats['faces']} visage{'s' if stats['faces'] != 1 else ''}, "
 				f"{stats['backups']} sauvegarde{'s' if stats['backups'] != 1 else ''} *_original suivie{'s' if stats['backups'] != 1 else ''}).")
+		self.log(f"🧠 Reconnaissance des visages : DeepFace, détecteur {options.detector}, modèle {options.model}, seuil {options.threshold:.2f}.")
 
 	# ---------- Construction de la fenêtre ----------
 
 	def build_widgets(self) -> None:
-		ttk.Style(self).configure("Treeview", rowheight = scaled(TREE_ROW_HEIGHT))
+		"""Construit la fenêtre : dossier, réglages, liste des personnes, vignettes, écriture, progression et
+		journal. Doit suivre apply_dark_theme(), qui remplit la base d'options du thème sombre.
+		"""
+		style = ttk.Style(self)
+		style.configure("Treeview", rowheight = scaled(TREE_ROW_HEIGHT))
+		# Vignettes de visages : un cadre coloré de quelques pixels marque celles qui sont sélectionnées
+		colors = SELECTION_COLORS["dark" if SETTINGS["dark"] else "light"]
+		style.configure("Face.TLabel", padding = scaled(3))
+		style.configure(
+			"SelectedFace.TLabel",
+			padding = scaled(3),
+			background = colors["background"],
+			foreground = colors["text"],
+		)
 
 		# --- Barre du haut : dossier et lancement de l'analyse ---
 		top = ttk.Frame(self, padding = 6)
@@ -1519,20 +1663,29 @@ class FaceTaggerApp(tk.Tk):
 		directory_entry.pack(side = "left", fill = "x", expand = True, padx = 6)
 		for widget in (directory_label, directory_entry):
 			ToolTip(widget, "📁 Dossier de photos à analyser, sous-dossiers compris.\n"
-				"💡 Saisissez son chemin ou choisissez-le avec « Parcourir… ».")
+				"💡 Saisissez son chemin ou choisissez-le avec « Parcourir… ».\n"
+				"🖼️ « Photos… » analyse plutôt quelques photos choisies une à une.")
 		browse_button = ttk.Button(top, text = "Parcourir…", command = self.choose_directory)
 		browse_button.pack(side = "left")
 		ToolTip(browse_button, "📂 Choisir le dossier de photos à analyser.")
-		self.scan_button = ttk.Button(top, text = "🔍 Analyser", command = self.start_scan)
+		# Sans le sélecteur de variante U+FE0F après l'emoji : Tk le dessine comme un large blanc
+		photos_button = ttk.Button(top, text = "🖼 Photos…", command = self.choose_photos)
+		photos_button.pack(side = "left", padx = (6, 0))
+		ToolTip(
+			photos_button,
+			"🖼️ Choisir une ou plusieurs photos précises à analyser, au lieu d'un dossier entier.\n"
+			"🖱️ Ctrl ou Maj + clic dans la boîte de dialogue pour en sélectionner plusieurs.",
+		)
+		self.scan_button: ttk.Button = ttk.Button(top, text = "🔍 Analyser", command = self.start_scan)
 		self.scan_button.pack(side = "left", padx = 6)
 		ToolTip(
 			self.scan_button,
-			"🔍 Détecte les visages des photos du dossier, lit les noms déjà présents dans leurs métadonnées, "
+			"🔍 Détecte les visages des photos avec DeepFace, lit les noms déjà présents dans leurs métadonnées, "
 			"puis regroupe les visages par personne.\n"
 			"💡 Les photos déjà analysées et inchangées sont reprises de la base : un nouveau passage est rapide.\n"
-			"📥 Au premier lancement, les modèles de reconnaissance (≈ 37 Mio) sont téléchargés.",
+			"📥 Au premier lancement, DeepFace télécharge les poids de ses modèles (≈ 255 Mo avec RetinaFace et ArcFace).",
 		)
-		self.stop_button = ttk.Button(
+		self.stop_button: ttk.Button = ttk.Button(
 			top,
 			text = "⏹️ Arrêter",
 			command = self.cancel_event.set,
@@ -1554,15 +1707,15 @@ class FaceTaggerApp(tk.Tk):
 			text = "🎚️ Seuil de similarité :"
 		)
 		threshold_title.pack(side = "left")
-		self.threshold_label = ttk.Label(
+		self.threshold_label: ttk.Label = ttk.Label(
 			settings,
 			text = f"{self.threshold_var.get():.2f}",
 			width = 5
 		)
 		threshold_scale = ttk.Scale(
 			settings,
-			from_ = 0.20,
-			to = 0.70,
+			from_ = THRESHOLD_MIN,
+			to = THRESHOLD_MAX,
 			variable = self.threshold_var,
 			length = scaled(220),
 			command = lambda value: self.threshold_label.configure(text = f"{float(value):.2f}"),
@@ -1575,10 +1728,12 @@ class FaceTaggerApp(tk.Tk):
 		)
 		threshold_hint.pack(side = "left", padx = 4)
 		# Le réglage, sa valeur et leurs libellés portent la même infobulle
+		model = self.options.model
 		for widget in (threshold_title, threshold_scale, self.threshold_label, threshold_hint):
 			ToolTip(
 				widget,
-				"🎚️ Ressemblance minimale entre deux visages pour les attribuer à la même personne (de 0.20 à 0.70).\n"
+				f"🎚️ Ressemblance minimale entre deux visages pour les attribuer à la même personne (de {THRESHOLD_MIN:.2f} à {THRESHOLD_MAX:.2f}).\n"
+				f"🧠 Chaque modèle a sa propre échelle : pour {model}, la valeur conseillée est {RECOGNITION_MODELS[model]:.2f}.\n"
 				"⬆️ Plus haut : groupes plus sûrs, mais une même personne peut être répartie entre plusieurs groupes.\n"
 				"⬇️ Plus bas : groupes plus larges, au risque de mélanger des personnes.\n"
 				"💡 S'applique à la prochaine analyse, ou tout de suite avec « Regrouper à nouveau ».",
@@ -1597,7 +1752,7 @@ class FaceTaggerApp(tk.Tk):
 			"« Vacances » pourrait sinon nommer un groupe.\n"
 			"💡 S'applique à la prochaine analyse, ou tout de suite avec « Regrouper à nouveau ».",
 		)
-		self.regroup_button = ttk.Button(
+		self.regroup_button: ttk.Button = ttk.Button(
 			settings,
 			text = "🔄 Regrouper à nouveau",
 			command = self.regroup
@@ -1616,15 +1771,17 @@ class FaceTaggerApp(tk.Tk):
 
 		left = ttk.Frame(panes)
 		panes.add(left, weight = 1)
-		self.tree = ttk.Treeview(left, columns = ("faces", "photos", "source"), selectmode = "extended")
+		self.tree: ttk.Treeview = ttk.Treeview(left, columns = ("faces", "photos", "source", "status"), selectmode = "extended")
 		self.tree.heading("#0", text = "Personne")
 		self.tree.heading("faces", text = "Visages")
 		self.tree.heading("photos", text = "Photos")
 		self.tree.heading("source", text = "Origine du nom")
-		self.tree.column("#0", width = scaled(220))
+		self.tree.heading("status", text = "Métadonnées")
+		self.tree.column("#0", width = scaled(200))
 		self.tree.column("faces", width = scaled(60), anchor = "center")
 		self.tree.column("photos", width = scaled(60), anchor = "center")
-		self.tree.column("source", width = scaled(110))
+		self.tree.column("source", width = scaled(100))
+		self.tree.column("status", width = scaled(100))
 		tree_scroll = ttk.Scrollbar(left, orient = "vertical", command = self.tree.yview)
 		self.tree.configure(yscrollcommand = tree_scroll.set)
 		person_buttons = ttk.Frame(left)
@@ -1652,49 +1809,53 @@ class FaceTaggerApp(tk.Tk):
 		self.tree.bind("<<TreeviewSelect>>", self.on_select)
 		self.tree.bind("<Double-Button-1>", lambda event: self.rename_selected())
 		# Infobulle selon l'endroit survolé : rôle de la colonne sur les en-têtes, résumé de la personne sur les lignes
-		self.heading_tips = {
+		self.heading_tips: dict[str, str] = {
 			"#0": "👤 Nom de la personne, ou « Inconnu n°… » tant qu'elle n'est pas nommée. Les personnes nommées "
 				"viennent d'abord (par ordre alphabétique), puis les inconnues, des plus fréquentes aux plus rares.",
 			"#1": "🙂 Nombre de visages regroupés pour cette personne.",
 			"#2": "🖼️ Nombre de photos où elle apparaît.",
 			"#3": "🏷️ étiquette : nom lu dans les métadonnées des photos.\n✍️ saisi : nom donné dans Face Tagger.\n"
 				"❓ vide : personne pas encore nommée.",
+			"#4": "💾 État des métadonnées, selon les cases « Écrire » cochées :\n"
+				"✅ à jour : le nom figure déjà dans toutes ses photos.\n"
+				"✏️ N à écrire : photos où le nom manque encore ; « Valider la personne » l'y inscrit.\n"
+				"🙈 ignorée : jamais écrite.",
 		}
 		ToolTip(self.tree, self.tree_tooltip)
 
 		right = ttk.Frame(panes)
 		panes.add(right, weight = 3)
-		self.person_title = ttk.Label(right, text = "", font = ("TkDefaultFont", 12, "bold"))
+		self.person_title: ttk.Label = ttk.Label(right, text = "", font = ("TkDefaultFont", 12, "bold"))
 		self.person_title.pack(anchor = "w", padx = 4)
 
 		# Navigation entre les pages : seules les vignettes de la page affichée sont chargées en mémoire
 		navigation = ttk.Frame(right)
 		navigation.pack(fill = "x", padx = 4, pady = 2)
-		self.first_button = ttk.Button(
+		self.first_button: ttk.Button = ttk.Button(
 			navigation,
 			text = "«",
 			width = 3,
 			command = lambda: self.go_to_page(0)
 		)
-		self.previous_button = ttk.Button(
+		self.previous_button: ttk.Button = ttk.Button(
 			navigation,
 			text = "‹",
 			width = 3,
 			command = lambda: self.go_to_page(self.page - 1)
 		)
-		self.page_label = ttk.Label(
+		self.page_label: ttk.Label = ttk.Label(
 			navigation,
 			text = "Page 1 / 1",
 			width = 14,
 			anchor = "center"
 		)
-		self.next_button = ttk.Button(
+		self.next_button: ttk.Button = ttk.Button(
 			navigation,
 			text = "›",
 			width = 3,
 			command = lambda: self.go_to_page(self.page + 1)
 		)
-		self.last_button = ttk.Button(
+		self.last_button: ttk.Button = ttk.Button(
 			navigation,
 			text = "»",
 			width = 3,
@@ -1709,9 +1870,9 @@ class FaceTaggerApp(tk.Tk):
 			(self.last_button, "⏭️ Dernière page"),
 		):
 			ToolTip(widget, tip)
-		self.range_label = ttk.Label(navigation, text = "")
+		self.range_label: ttk.Label = ttk.Label(navigation, text = "")
 		self.range_label.pack(side = "left", padx = 10)
-		self.page_size_box = ttk.Combobox(
+		self.page_size_box: ttk.Combobox = ttk.Combobox(
 			navigation,
 			textvariable = self.page_size_var, values = ("50", "100", "200", "500"),
 			width = 5,
@@ -1728,12 +1889,44 @@ class FaceTaggerApp(tk.Tk):
 				"une valeur plus petite économise la mémoire et accélère l'affichage.",
 			)
 
+		# Sélection de vignettes : les commandes de cette barre s'appliquent à toutes les vignettes sélectionnées,
+		# y compris celles des autres pages
+		selection_bar = ttk.Frame(right)
+		selection_bar.pack(fill = "x", padx = 4, pady = 2)
+		self.selection_label: ttk.Label = ttk.Label(selection_bar, text = "Aucun visage sélectionné", width = 26)
+		self.selection_label.pack(side = "left")
+		ToolTip(
+			self.selection_label,
+			"☑️ Nombre de vignettes sélectionnées, toutes pages confondues.\n"
+			"🖱️ Clic : sélectionner une vignette — Ctrl + clic : ajouter ou retirer — Maj + clic : sélectionner une plage.\n"
+			"⌨️ Ctrl + A : tout sélectionner — Échap : tout désélectionner — Suppr : écarter.",
+		)
+		# Textes des boutons sans le sélecteur de variante U+FE0F, que Tk dessine comme un large blanc
+		self.select_all_button: ttk.Button = ttk.Button(selection_bar, text = "☑ Tout sélectionner", command = self.select_all_faces)
+		self.select_all_button.pack(side = "left", padx = 2)
+		ToolTip(self.select_all_button, "☑️ Sélectionne tous les visages de la personne affichée, toutes pages confondues (Ctrl + A).")
+		self.selection_buttons: list[ttk.Button] = []
+		for text, command, tip in (
+			("↪ Déplacer…", self.move_selected_faces,
+				"↪️ Déplace les visages sélectionnés vers une personne, existante ou nouvelle, choisie par son nom.\n"
+				"💡 Pour corriger d'un coup les visages attribués à tort à cette personne."),
+			("✂ Détacher", self.detach_selected_faces,
+				"✂️ Réunit les visages sélectionnés dans un nouveau groupe, sans nom, à nommer ensuite."),
+			("🗑 Écarter", self.delete_selected_faces,
+				"🗑️ Écarte les visages sélectionnés (ce ne sont pas des visages) : ils ne sont plus affichés ni écrits "
+				"dans les métadonnées (touche Suppr).\n"
+				"💡 Une nouvelle analyse les fait réapparaître."),
+		):
+			button = ttk.Button(selection_bar, text = text, command = command, state = "disabled")
+			button.pack(side = "left", padx = 2)
+			ToolTip(button, tip)
+			self.selection_buttons.append(button)
+
 		ttk.Label(
 			right,
-			text = "Double-clic : ouvrir la photo — clic droit : déplacer ou écarter le visage").pack(anchor = "w",
-			padx = 4
-		)
-		self.canvas = tk.Canvas(right, highlightthickness = 0)
+			text = "Clic : sélectionner — Ctrl ou Maj + clic : sélection multiple — double-clic : ouvrir la photo — clic droit : actions"
+		).pack(anchor = "w", padx = 4)
+		self.canvas: tk.Canvas = tk.Canvas(right, highlightthickness = 0, takefocus = 1)
 		canvas_scroll = ttk.Scrollbar(
 			right,
 			orient = "vertical",
@@ -1742,7 +1935,7 @@ class FaceTaggerApp(tk.Tk):
 		self.canvas.configure(yscrollcommand = canvas_scroll.set)
 		canvas_scroll.pack(side = "right", fill = "y")
 		self.canvas.pack(side = "left", fill = "both", expand = True)
-		self.faces_frame = ttk.Frame(self.canvas)
+		self.faces_frame: ttk.Frame = ttk.Frame(self.canvas)
 		self.canvas.create_window((0, 0), window = self.faces_frame, anchor = "nw")
 		self.faces_frame.bind(
 			"<Configure>",
@@ -1765,13 +1958,29 @@ class FaceTaggerApp(tk.Tk):
 			"<Button-5>",
 			lambda event: self.canvas.yview_scroll(1, "units")
 		)
+		# Raccourcis clavier de la sélection : le canevas prend le focus à chaque clic sur une vignette. « break »
+		# empêche Tk de transmettre la touche aux liaisons générales de la fenêtre.
+		for sequence, handler in (
+			("<Control-a>", self.select_all_faces),
+			("<Control-A>", self.select_all_faces),      # Verrouillage des majuscules actif
+			("<Escape>", self.clear_face_selection),
+			("<Delete>", self.delete_selected_faces),
+		):
+			self.canvas.bind(sequence, lambda event, handler = handler: (handler(), "break")[1])
+		# Clic dans le vide, entre ou sous les vignettes : tout désélectionner, comme dans l'Explorateur
+		for widget in (self.canvas, self.faces_frame):
+			widget.bind("<Button-1>", lambda event: self.clear_face_selection())
 
 		# --- Bas de fenêtre : écriture des métadonnées, progression et journal ---
 		bottom = ttk.Frame(self, padding = 6)
 		bottom.pack(fill = "x")
 		write_label = ttk.Label(bottom, text = "💾 Écrire :")
 		write_label.pack(side = "left")
-		ToolTip(write_label, "💾 Métadonnées que « Écrire dans les métadonnées » inscrit dans les photos.")
+		ToolTip(
+			write_label,
+			"💾 Métadonnées que « Valider la personne » et « Tout écrire » inscrivent dans les photos.\n"
+			"📋 La colonne « Métadonnées » de la liste des personnes en tient compte.",
+		)
 		for text, variable, padding, tip in (
 			("régions de visages (MWG)", self.write_regions_var, 4,
 				"🔲 Position et nom de chaque visage (XMP-mwg-rs:RegionInfo), au format MWG reconnu par de nombreux "
@@ -1792,16 +2001,29 @@ class FaceTaggerApp(tk.Tk):
 			check = ttk.Checkbutton(bottom, text = text, variable = variable)
 			check.pack(side = "left", padx = padding)
 			ToolTip(check, tip)
-		self.write_button = ttk.Button(bottom, text = "💾 Écrire dans les métadonnées", command = self.start_write)
-		self.write_button.pack(side = "right")
+		self.validate_button: ttk.Button = ttk.Button(
+			bottom,
+			text = "✅ Valider la personne",
+			command = self.validate_person,
+			state = "disabled"
+		)
+		self.validate_button.pack(side = "right")
 		ToolTip(
-			self.write_button,
-			"💾 Écrit les noms des personnes nommées (et non ignorées) dans leurs photos, selon les cases cochées, "
-			"puis relit chaque photo pour vérifier.\n"
+			self.validate_button,
+			"✅ Écrit le nom de la personne sélectionnée dans celles de ses photos où il manque encore, selon les cases "
+			"cochées, puis relit chaque photo pour vérifier.\n"
+			"👤 Une seule personne à la fois : parcourez d'abord ses vignettes, et déplacez ou écartez les intrus.\n"
 			"💡 Les étiquettes déjà présentes sont conservées, sauf l'ancien nom d'une personne renommée.",
 		)
-		self.restore_button = ttk.Button(bottom, text = "♻️ Restaurer les sauvegardes…", command = self.start_restore)
-		self.restore_button.pack(side = "right", padx = 6)
+		self.write_button: ttk.Button = ttk.Button(bottom, text = "💾 Tout écrire…", command = self.start_write)
+		self.write_button.pack(side = "right", padx = 6)
+		ToolTip(
+			self.write_button,
+			"💾 Écrit d'un coup le nom de toutes les personnes nommées (et non ignorées) dans les photos où il manque encore.\n"
+			"⚠️ Sans vérification personne par personne : « Valider la personne » est plus sûr.",
+		)
+		self.restore_button: ttk.Button = ttk.Button(bottom, text = "♻️ Restaurer les sauvegardes…", command = self.start_restore)
+		self.restore_button.pack(side = "right")
 		ToolTip(
 			self.restore_button,
 			"♻️ Remet dans leur version d'origine les photos d'un dossier (sous-dossiers compris) : chaque copie "
@@ -1809,14 +2031,14 @@ class FaceTaggerApp(tk.Tk):
 			"⚠️ Les noms écrits dans ces photos sont perdus. Le dossier est demandé, puis une confirmation.",
 		)
 
-		self.progress = ttk.Progressbar(self, mode = "determinate")
+		self.progress: ttk.Progressbar = ttk.Progressbar(self, mode = "determinate")
 		self.progress.pack(fill = "x", padx = 6)
 		ttk.Label(self, textvariable = self.status_var, padding = (6, 2)).pack(fill = "x")
 		# Journal : zone de texte et ascenseur ttk (celui de ScrolledText, natif sous Windows, resterait clair en
 		# mode sombre)
 		log_frame = ttk.Frame(self)
 		log_frame.pack(fill = "x", padx = 6, pady = (0, 6))
-		self.log_text = tk.Text(log_frame, height = 8, state = "disabled", wrap = "word")
+		self.log_text: tk.Text = tk.Text(log_frame, height = 8, state = "disabled", wrap = "word")
 		log_scroll = ttk.Scrollbar(log_frame, orient = "vertical", command = self.log_text.yview)
 		self.log_text.configure(yscrollcommand = log_scroll.set)
 		log_scroll.pack(side = "right", fill = "y")
@@ -1833,7 +2055,7 @@ class FaceTaggerApp(tk.Tk):
 		self.log_text.see("end")
 		self.log_text.configure(state = "disabled")
 
-	def post(self, *event) -> None:
+	def post(self, *event: object) -> None:
 		"""Envoie un événement vers le thread de l'interface (appelable depuis un thread de travail)."""
 		self.events.put(event)
 
@@ -1853,7 +2075,9 @@ class FaceTaggerApp(tk.Tk):
 					self.library = event[1]
 					self.refresh_persons()
 				elif kind == "tags":
+					# Étiquettes relues après une écriture : la colonne « Métadonnées » change
 					self.library.photo_tags.update(event[1])
+					self.update_person_statuses()
 				elif kind == "restored":
 					self.after_restore(event[1])
 				elif kind == "done":
@@ -1863,13 +2087,16 @@ class FaceTaggerApp(tk.Tk):
 		self.after(100, self.poll_events)
 
 	def set_busy(self, busy: bool) -> None:
-		"""Active ou désactive les boutons pendant une analyse ou une écriture."""
+		"""Active ou désactive les boutons pendant une analyse, une écriture ou une restauration."""
+		self.busy = busy
 		state = "disabled" if busy else "normal"
 		for button in (self.scan_button, self.write_button, self.regroup_button, self.restore_button):
 			button.configure(state = state)
 		self.stop_button.configure(state = "normal" if busy else "disabled")
+		self.update_action_states()
 
 	def on_close(self) -> None:
+		"""Fermeture de la fenêtre : demande l'arrêt du travail en cours, ferme la base puis la fenêtre."""
 		self.cancel_event.set()
 		self.database.close()
 		self.destroy()
@@ -1877,18 +2104,63 @@ class FaceTaggerApp(tk.Tk):
 	# ---------- Analyse des photos (thread de travail) ----------
 
 	def choose_directory(self) -> None:
-		chosen = filedialog.askdirectory(initialdir = self.directory_var.get() or str(Path.home()))
+		"""Choisit le dossier de photos à analyser ; il remplace les photos choisies une à une."""
+		chosen = filedialog.askdirectory(initialdir = self.base_directory())
 		if chosen:
+			self.chosen_photos = []                  # Un dossier remplace les photos choisies une à une
 			self.directory_var.set(chosen)
 
-	def start_scan(self) -> None:
-		directory = os.path.abspath(os.path.expanduser(self.directory_var.get().strip()))
-		if not os.path.isdir(directory):
-			messagebox.showerror(
-				emoji("❌ Dossier introuvable"),
-				"Choisissez un dossier de photos valide."
-			)
+	def choose_photos(self) -> None:
+		"""Choisit une ou plusieurs photos précises à analyser, au lieu d'un dossier entier."""
+		# Extensions en minuscules et en majuscules : sous Linux, le filtre de Tk distingue les deux
+		patterns = " ".join(f"*{extension} *{extension.upper()}" for extension in sorted(IMAGE_EXTENSIONS))
+		chosen = filedialog.askopenfilenames(
+			parent = self,
+			title = "Photos à analyser",
+			initialdir = self.base_directory(),
+			filetypes = [("Photos", patterns), ("Tous les fichiers", "*.*")],
+		)
+		# splitlist : selon la version de Tk, le résultat est un tuple ou une chaîne au format Tcl
+		files = [os.path.abspath(path) for path in self.tk.splitlist(chosen)] if chosen else []
+		files = sorted({path for path in files if Path(path).suffix.lower() in IMAGE_EXTENSIONS})
+		if not files:
 			return
+		self.chosen_photos = files
+		folders = {os.path.dirname(path) for path in files}
+		where = f"dans {folders.pop()}" if len(folders) == 1 else f"dans {len(folders)} dossiers"
+		self.chosen_label = emoji(f"📑 {len(files)} photo{'s' if len(files) != 1 else ''} choisie{'s' if len(files) != 1 else ''} {where}")
+		self.directory_var.set(self.chosen_label)
+
+	def using_chosen_photos(self) -> bool:
+		"""Vrai si le champ « Dossier » affiche encore le libellé des photos choisies (il n'a pas été modifié depuis)."""
+		return bool(self.chosen_photos) and self.directory_var.get() == self.chosen_label
+
+	def base_directory(self) -> str:
+		"""Dossier de départ des boîtes de dialogue : celui des photos choisies, ou le dossier saisi."""
+		if self.using_chosen_photos():
+			return os.path.dirname(self.chosen_photos[0])
+		return self.directory_var.get().strip() or str(Path.home())
+
+	def start_scan(self) -> None:
+		"""Vérifie la source (dossier ou photos choisies) puis lance l'analyse dans un thread de travail."""
+		if self.using_chosen_photos():
+			directory: Optional[str] = None
+			photos: Optional[list[str]] = [photo for photo in self.chosen_photos if os.path.isfile(photo)]
+			if not photos:
+				messagebox.showerror(
+					emoji("❌ Photos introuvables"),
+					"Les photos choisies n'existent plus. Choisissez-en d'autres."
+				)
+				return
+		else:
+			directory = os.path.abspath(os.path.expanduser(self.directory_var.get().strip()))
+			photos = None
+			if not os.path.isdir(directory):
+				messagebox.showerror(
+					emoji("❌ Dossier introuvable"),
+					"Choisissez un dossier de photos valide."
+				)
+				return
 		self.cancel_event.clear()
 		self.set_busy(True)
 		self.progress.configure(value = 0)
@@ -1896,39 +2168,54 @@ class FaceTaggerApp(tk.Tk):
 		threshold, use_keywords = float(self.threshold_var.get()), self.keywords_var.get()
 		self.worker = threading.Thread(
 			target = self.scan_worker,
-			args = (directory, threshold, use_keywords),
+			args = (directory, photos, threshold, use_keywords),
 			daemon = True)
 		self.worker.start()
 
 	def create_engine(self) -> FaceEngine:
-		"""Charge (et au besoin télécharge) les modèles. N'est appelée que si une photo doit être analysée."""
-		detection_model, recognition_model = ensure_models(
-			self.data_directory / "models",
-			lambda message: self.post("log", message),
-		)
+		"""Charge DeepFace et ses deux réseaux. N'est appelée que si une photo doit être analysée."""
+		self.post("log", f"🧠 Chargement de DeepFace (détecteur {self.options.detector}, modèle {self.options.model})…")
+		weights = self.data_directory / ".deepface" / "weights"
+		if not weights.is_dir() or not any(weights.iterdir()):
+			self.post("log", "📥 Premier lancement : DeepFace télécharge les poids de ses modèles, ce qui peut prendre quelques minutes.")
+		deepface = load_deepface(self.data_directory)
 		return FaceEngine(
-			detection_model,
-			recognition_model,
+			deepface,
+			self.options.model,
+			self.options.detector,
 			self.options.max_image_size,
 			self.options.min_face_size,
 			self.options.detection_score,
 		)
 
-	def scan_worker(self, directory: str, threshold: float, use_keywords: bool) -> None:
+	def scan_worker(self, directory: Optional[str], photos: Optional[list[str]], threshold: float, use_keywords: bool) -> None:
 		"""Détecte les visages, lit les étiquettes existantes puis regroupe (exécuté hors du thread Tk).
-		Ce qui est déjà en base pour une photo inchangée n'est ni ré-analysé ni relu."""
+		Analyse le dossier `directory`, ou seulement les photos choisies `photos`. Ce qui est déjà en base pour une
+		photo inchangée n'est ni ré-analysé ni relu."""
 		try:
-			self.post("log", f"📂 Exploration de {directory}…")
-			photos = list_photos(directory)
-			if not photos:
-				self.post("log", "⚠️ Aucune photo trouvée dans ce dossier.")
-				return
-			self.post("log", f"🖼️ {len(photos)} photo{'s' if len(photos) != 1 else ''} trouvées.")
+			if photos is None:
+				self.post("log", f"📂 Exploration de {directory}…")
+				photos = list_photos(directory)
+				if not photos:
+					self.post("log", "⚠️ Aucune photo trouvée dans ce dossier.")
+					return
+				self.post("log", f"🖼️ {len(photos)} photo{'s' if len(photos) != 1 else ''} trouvée{'s' if len(photos) != 1 else ''}.")
+			else:
+				self.post("log", f"📑 {len(photos)} photo{'s' if len(photos) != 1 else ''} choisie{'s' if len(photos) != 1 else ''}.")
 
-			# Si les paramètres de détection ont changé, les visages mémorisés ne sont plus valables
-			signature = f"{self.options.max_image_size}|{self.options.min_face_size}|{self.options.detection_score}"
+			# Si le moteur ou les paramètres de détection ont changé, les visages mémorisés ne sont plus valables :
+			# les empreintes de deux modèles différents ne sont pas comparables entre elles
+			signature = "|".join((
+				"deepface",
+				os.environ.get("DEEPFACE_BACKEND_ENGINE", "").strip() or DEEPFACE_ENGINE,
+				self.options.model,
+				self.options.detector,
+				str(self.options.max_image_size),
+				str(self.options.min_face_size),
+				str(self.options.detection_score),
+			))
 			if self.database.reset_analysis_if_needed(signature):
-				self.post("log", "🗄️ Paramètres de détection modifiés : les photos seront ré-analysées.")
+				self.post("log", "🗄️ Modèle ou paramètres de détection modifiés : les photos seront ré-analysées.")
 			known = self.database.signatures()
 
 			engine: Optional[FaceEngine] = None
@@ -2050,7 +2337,7 @@ class FaceTaggerApp(tk.Tk):
 				iid = str(person.identifier),
 				text = " " + label,
 				image = icon,
-				values = (len(person.faces), len(person.photos), emoji(origin)),
+				values = (len(person.faces), len(person.photos), emoji(origin), emoji(self.person_status(person))),
 			)
 		still_there = [str(i) for i in select if i in self.library.persons]
 		if not still_there and persons:
@@ -2059,6 +2346,40 @@ class FaceTaggerApp(tk.Tk):
 			self.tree.selection_set(still_there)
 		else:
 			self.show_person(None)
+		self.update_action_states()
+
+	def write_fields(self) -> tuple[bool, bool, bool]:
+		"""Cases « Écrire » cochées : régions de visages, PersonInImage, mots-clés."""
+		return self.write_regions_var.get(), self.write_person_var.get(), self.write_keywords_var.get()
+
+	def missing_photos(self, person: Person) -> list[str]:
+		"""Photos de la personne où son nom manque encore, pour les cases « Écrire » cochées."""
+		return photos_missing_name(self.library, person, *self.write_fields())
+
+	def person_status(self, person: Person) -> str:
+		"""Texte de la colonne « Métadonnées » : nom déjà présent dans toutes les photos, ou nombre de photos à écrire.
+		Vide quand il n'y a rien à évaluer (personne sans nom, ExifTool absent, aucune case « Écrire » cochée)."""
+		if person.ignored:
+			return "🙈 ignorée"
+		if not person.name or not self.exiftool.available or not any(self.write_fields()):
+			return ""
+		missing = len(self.missing_photos(person))
+		# ✏ sans le sélecteur de variante U+FE0F, que Tk dessine comme un large blanc
+		return "✅ à jour" if missing == 0 else f"✏ {missing} à écrire"
+
+	def update_person_statuses(self) -> None:
+		"""Met à jour la seule colonne « Métadonnées » (après une écriture, ou quand une case « Écrire » change),
+		sans reconstruire la liste : la sélection, la page et la position dans la page sont conservées."""
+		for iid in self.tree.get_children():
+			person = self.library.persons.get(int(iid))
+			if person is not None:
+				self.tree.set(iid, "status", emoji(self.person_status(person)))
+
+	def update_action_states(self) -> None:
+		"""« Valider la personne » n'est actif que pour une seule personne, nommée et non ignorée, hors travail en cours."""
+		selected = self.selected_persons()
+		ready = not self.busy and len(selected) == 1 and bool(selected[0].name) and not selected[0].ignored
+		self.validate_button.configure(state = "normal" if ready else "disabled")
 
 	def tree_tooltip(self, event: tk.Event) -> Optional[str]:
 		"""Infobulle de la liste des personnes : rôle de la colonne sur les en-têtes, résumé de la personne sur les
@@ -2078,20 +2399,32 @@ class FaceTaggerApp(tk.Tk):
 			status = "🏷️ Nom lu dans les métadonnées des photos."
 		else:
 			status = "✍️ Nom saisi dans Face Tagger."
+		if person.name and not person.ignored and self.exiftool.available and any(self.write_fields()):
+			missing = len(self.missing_photos(person))
+			if missing:
+				status += (f"\n✏️ Nom absent de {missing} photo{'s' if missing != 1 else ''} : "
+					"« Valider la personne » l'y écrit.")
+			else:
+				status += "\n✅ Nom présent dans toutes ses photos : rien à écrire."
 		return (
 			f"👤 {person.display_name} — {len(person.faces)} visage{'s' if len(person.faces) != 1 else ''} dans {len(person.photos)} photo{'s' if len(person.photos) != 1 else ''}\n{status}\n"
 			"🖱️ Double-clic : renommer — Ctrl ou Maj + clic : sélectionner plusieurs personnes"
 		)
 
 	def selected_persons(self) -> list[Person]:
+		"""Personnes sélectionnées dans la liste (seulement celles qui existent encore)."""
 		return [self.library.persons[int(i)] for i in self.tree.selection() if int(i) in self.library.persons]
 
 	def on_select(self, event: Optional[tk.Event] = None) -> None:
+		"""Changement de sélection dans la liste : affiche la personne choisie (ou le nombre de personnes
+		sélectionnées) et met à jour les boutons.
+		"""
 		selected = self.selected_persons()
 		# La page courante est conservée tant que la personne affichée ne change pas
 		self.show_person(selected[0] if len(selected) == 1 else None, keep_page = True)
 		if len(selected) > 1:
 			self.person_title.configure(text = emoji(f"👥 {len(selected)} personnes sélectionnées"))
+		self.update_action_states()
 
 	def page_size(self) -> int:
 		"""Nombre de vignettes par page (réglable dans l'interface)."""
@@ -2105,6 +2438,16 @@ class FaceTaggerApp(tk.Tk):
 		changed = person is not self.current_person
 		self.current_person = person
 		self.sorted_faces = sorted(person.faces, key = lambda f: -f.score) if person is not None else []
+		self.face_index = {face: index for index, face in enumerate(self.sorted_faces)}
+		if changed:
+			# La sélection de vignettes ne vaut que pour la personne affichée
+			self.selected_faces = set()
+			self.selection_anchor = None
+		else:
+			# Visages partis entre-temps (déplacés, détachés, écartés) : ils quittent la sélection
+			self.selected_faces &= set(self.sorted_faces)
+			if self.selection_anchor is not None and self.selection_anchor >= len(self.sorted_faces):
+				self.selection_anchor = None
 		if changed or not keep_page:
 			self.page = 0
 		self.render_page()
@@ -2121,6 +2464,7 @@ class FaceTaggerApp(tk.Tk):
 			child.destroy()
 		self.face_images.clear()
 		self.face_labels.clear()
+		self.face_widgets.clear()
 		person = self.current_person
 		if person is None:
 			self.person_title.configure(text = "")
@@ -2128,6 +2472,7 @@ class FaceTaggerApp(tk.Tk):
 			self.range_label.configure(text = "")
 			for button in (self.first_button, self.previous_button, self.next_button, self.last_button):
 				button.configure(state = "disabled")
+			self.update_face_selection()
 			return
 
 		size = self.page_size()
@@ -2155,8 +2500,15 @@ class FaceTaggerApp(tk.Tk):
 				self.faces_frame,
 				image = image,
 				text = os.path.basename(face.photo)[:16],
-				compound = "top"
+				compound = "top",
+				style = "Face.TLabel"
 			)
+			# Sélection comme dans l'Explorateur : clic simple, Ctrl + clic (Commande + clic sous macOS), Maj + clic
+			label.bind("<Button-1>", lambda event, f = face: self.click_face(f, "single"))
+			label.bind("<Control-Button-1>", lambda event, f = face: self.click_face(f, "toggle"))
+			label.bind("<Shift-Button-1>", lambda event, f = face: self.click_face(f, "range"))
+			if sys.platform == "darwin":
+				label.bind("<Command-Button-1>", lambda event, f = face: self.click_face(f, "toggle"))
 			label.bind("<Double-Button-1>", lambda event, f = face: self.open_photo(f))
 			label.bind("<Button-3>", lambda event, f = face: self.face_menu(event, f))
 			label.bind("<Button-2>", lambda event, f = face: self.face_menu(event, f))   # Clic droit sous macOS
@@ -2164,8 +2516,14 @@ class FaceTaggerApp(tk.Tk):
 			label.bind("<Button-4>", lambda event: self.canvas.yview_scroll(-1, "units"))
 			label.bind("<Button-5>", lambda event: self.canvas.yview_scroll(1, "units"))
 			# Après les liaisons ci-dessus, que l'infobulle complète sans les remplacer
-			ToolTip(label, photo_caption(face.photo) + "\n🖱️ Double-clic : ouvrir la photo — clic droit : déplacer ou écarter le visage")
+			ToolTip(
+				label,
+				photo_caption(face.photo) + "\n🖱️ Clic : sélectionner — Ctrl ou Maj + clic : sélection multiple\n"
+				"🖱️ Double-clic : ouvrir la photo — clic droit : déplacer, détacher ou écarter",
+			)
 			self.face_labels.append(label)
+			self.face_widgets[face] = label
+		self.update_face_selection()
 		self.layout_faces(force = True)
 		self.canvas.yview_moveto(0)
 
@@ -2183,12 +2541,90 @@ class FaceTaggerApp(tk.Tk):
 				pady = 4
 			)
 
+	# ---------- Sélection de plusieurs vignettes ----------
+
+	def click_face(self, face: FaceRecord, mode: str) -> None:
+		"""Sélectionne des vignettes comme dans l'Explorateur.
+
+		- « single » (clic) : cette vignette seule ;
+		- « toggle » (Ctrl + clic) : ajoute la vignette à la sélection, ou l'en retire ;
+		- « range » (Maj + clic) : toutes les vignettes entre la dernière cliquée et celle-ci, pages précédentes
+			comprises (les rangs sont ceux de la liste complète des visages de la personne).
+		"""
+		# Les raccourcis clavier (Ctrl + A, Échap, Suppr) sont liés au canevas : il prend le focus
+		self.canvas.focus_set()
+		index = self.face_index.get(face)
+		if index is None:
+			return
+		if mode == "toggle":
+			if face in self.selected_faces:
+				self.selected_faces.discard(face)
+			else:
+				self.selected_faces.add(face)
+			self.selection_anchor = index
+		elif mode == "range" and self.selection_anchor is not None:
+			low, high = sorted((self.selection_anchor, index))
+			self.selected_faces = set(self.sorted_faces[low:high + 1])
+		else:
+			self.selected_faces = {face}
+			self.selection_anchor = index
+		self.update_face_selection()
+
+	def select_all_faces(self) -> None:
+		"""Sélectionne tous les visages de la personne affichée, toutes pages confondues."""
+		self.selected_faces = set(self.sorted_faces)
+		self.update_face_selection()
+
+	def clear_face_selection(self) -> None:
+		"""Désélectionne toutes les vignettes (touche Échap, ou clic dans le vide)."""
+		self.canvas.focus_set()
+		self.selected_faces = set()
+		self.selection_anchor = None
+		self.update_face_selection()
+
+	def update_face_selection(self) -> None:
+		"""Met en évidence les vignettes sélectionnées et active les commandes qui s'y appliquent."""
+		for face, label in self.face_widgets.items():
+			label.configure(style = "SelectedFace.TLabel" if face in self.selected_faces else "Face.TLabel")
+		count = len(self.selected_faces)
+		if count:
+			text = f"☑ {count} visage{'s' if count != 1 else ''} sélectionné{'s' if count != 1 else ''}"
+		else:
+			text = "Aucun visage sélectionné"
+		self.selection_label.configure(text = emoji(text))
+		for button in self.selection_buttons:
+			button.configure(state = "normal" if count else "disabled")
+		self.select_all_button.configure(state = "normal" if self.sorted_faces else "disabled")
+
+	def selected_face_list(self) -> list[FaceRecord]:
+		"""Visages sélectionnés, dans l'ordre d'affichage. Seuls comptent ceux qui appartiennent encore à la personne
+		affichée : une autre action (fusion, renommage) a pu les en retirer depuis."""
+		return [
+			face for face in self.sorted_faces
+			if face in self.selected_faces and face.person is self.current_person and not face.deleted
+		]
+
+	def after_faces_changed(self, origin: Optional[Person], fallback: Optional[Person] = None) -> None:
+		"""Vide la sélection et réaffiche la liste après un déplacement ou une suppression de visages. La personne
+		d'origine reste affichée si elle existe encore, sinon `fallback`."""
+		self.selected_faces = set()
+		self.selection_anchor = None
+		if origin is not None and origin.identifier in self.library.persons:
+			select: list[int] = [origin.identifier]
+		elif fallback is not None and fallback.identifier in self.library.persons:
+			select = [fallback.identifier]
+		else:
+			select = []
+		self.refresh_persons(select = select)
+
 	# ---------- Actions sur les personnes et les visages ----------
 
 	def known_names(self) -> list[str]:
+		"""Noms déjà donnés, triés sans tenir compte de la casse, pour les boîtes de saisie."""
 		return sorted({p.name for p in self.library.persons.values() if p.name}, key = str.casefold)
 
 	def rename_selected(self) -> None:
+		"""Renomme la personne sélectionnée ; un nom déjà utilisé réunit les deux groupes."""
 		selected = self.selected_persons()
 		if len(selected) != 1:
 			return
@@ -2201,10 +2637,11 @@ class FaceTaggerApp(tk.Tk):
 		)
 		if dialog.result:
 			merged = self.library.rename(person, dialog.result)
-			self.log(f"✍️ « {merged.name} » : {len(merged.faces)} visage{'s' if len(merged.faces) != 1 else ''}")
+			self.log(f"✍️ « {merged.name} » : {len(merged.faces)} visage{'s' if len(merged.faces) != 1 else ''}")
 			self.refresh_persons(select = [merged.identifier])
 
 	def merge_selected(self) -> None:
+		"""Fusionne les personnes sélectionnées (confirmation si elles portent des noms différents)."""
 		persons = self.selected_persons()
 		if len(persons) < 2:
 			messagebox.showinfo(
@@ -2222,12 +2659,14 @@ class FaceTaggerApp(tk.Tk):
 		self.refresh_persons(select = [merged.identifier])
 
 	def toggle_ignore(self) -> None:
+		"""Ignore les personnes sélectionnées, ou les réactive si elles l'étaient déjà."""
 		for person in self.selected_persons():
 			person.ignored = not person.ignored
 		self.refresh_persons()
 		self.show_person(self.current_person, keep_page = True)
 
 	def name_unknowns(self) -> None:
+		"""Ouvre la boîte qui présente une à une les personnes sans nom."""
 		if not any(not p.name and not p.ignored for p in self.library.persons.values()):
 			messagebox.showinfo(
 				emoji("🎉 Rien à faire"),
@@ -2238,91 +2677,177 @@ class FaceTaggerApp(tk.Tk):
 		self.refresh_persons()
 
 	def open_photo(self, face: FaceRecord) -> None:
+		"""Affiche la photo entière d'un visage, avec le cadre et le nom de chaque visage."""
 		PhotoViewer(self, self.library, face)
 
 	def face_menu(self, event: tk.Event, face: FaceRecord) -> None:
-		"""Menu contextuel d'un visage."""
+		"""Menu contextuel d'une vignette. Ses commandes portent sur toute la sélection si la vignette en fait
+		partie, sinon sur cette seule vignette (qui devient alors la sélection)."""
+		if face not in self.selected_faces:
+			self.click_face(face, "single")
+		count = len(self.selected_face_list())
+		suffix = f" ({count} visages)" if count > 1 else ""
 		menu = tk.Menu(self, tearoff = False)
 		menu.add_command(
 			label = emoji("🖼️ Ouvrir la photo"),
 			command = lambda: self.open_photo(face)
 		)
+		menu.add_separator()
 		menu.add_command(
-			label = emoji("↪️ Déplacer vers une personne…"),
-			command = lambda: self.move_face(face)
+			label = emoji(f"↪️ Déplacer vers une personne…{suffix}"),
+			command = self.move_selected_faces
 		)
 		menu.add_command(
-			label = emoji("✂️ Détacher dans un nouveau groupe"),
-			command = lambda: self.detach_face(face)
+			label = emoji(f"✂️ Détacher dans un nouveau groupe{suffix}"),
+			command = self.detach_selected_faces
 		)
 		menu.add_command(
-			label = emoji("🗑️ Ce n'est pas un visage (écarter)"),
-			command = lambda: self.delete_face(face)
+			label = emoji(f"🗑️ Ce n'est pas un visage (écarter){suffix}"),
+			command = self.delete_selected_faces
 		)
 		menu.tk_popup(event.x_root, event.y_root)
 
-	def move_face(self, face: FaceRecord) -> None:
+	def move_selected_faces(self) -> None:
+		"""Déplace les visages sélectionnés vers une personne choisie par son nom (créée si elle n'existe pas)."""
+		faces = self.selected_face_list()
+		if not faces:
+			return
+		count = len(faces)
 		dialog = NameDialog(
 			self,
-			"↪️ Déplacer le visage",
-			"Nom de la personne de destination :",
+			"↪️ Déplacer les visages" if count > 1 else "↪️ Déplacer le visage",
+			f"Nom de la personne de destination ({count} visage{'s' if count != 1 else ''}) :",
 			self.known_names()
 		)
 		if not dialog.result:
 			return
 		target = self.library.person_by_name(dialog.result) or self.library.new_person(dialog.result, "manual")
-		origin = face.person
-		self.library.move_face(face, target)
-		self.refresh_persons(select = [origin.identifier if origin and origin.identifier in self.library.persons else target.identifier])
+		origin = self.current_person
+		if target is origin:
+			return
+		for face in faces:
+			self.library.move_face(face, target)
+		self.log(f"↪️ {count} visage{'s' if count != 1 else ''} déplacé{'s' if count != 1 else ''} vers « {target.display_name} »")
+		self.after_faces_changed(origin, fallback = target)
 
-	def detach_face(self, face: FaceRecord) -> None:
+	def detach_selected_faces(self) -> None:
+		"""Réunit les visages sélectionnés dans un nouveau groupe sans nom, qui est ensuite affiché."""
+		faces = self.selected_face_list()
+		if not faces:
+			return
 		person = self.library.new_person()
-		self.library.move_face(face, person)
-		self.refresh_persons(select = [person.identifier])
+		for face in faces:
+			self.library.move_face(face, person)
+		self.log(f"✂️ {len(faces)} visage{'s' if len(faces) != 1 else ''} détaché{'s' if len(faces) != 1 else ''} dans « {person.display_name} »")
+		self.after_faces_changed(person)
 
-	def delete_face(self, face: FaceRecord) -> None:
-		origin = face.person
-		self.library.delete_face(face)
-		self.refresh_persons(select = [origin.identifier] if origin else [])
+	def delete_selected_faces(self) -> None:
+		"""Écarte les visages sélectionnés (faux positifs). Confirmation demandée au-delà d'un visage."""
+		faces = self.selected_face_list()
+		if not faces:
+			return
+		if len(faces) > 1 and not messagebox.askyesno(
+			emoji("🗑️ Écarter"),
+			f"Écarter {len(faces)} visages ? Ils ne seront plus affichés ni écrits dans les métadonnées "
+			"(une nouvelle analyse les fait réapparaître).",
+		):
+			return
+		origin = self.current_person
+		for face in faces:
+			self.library.delete_face(face)
+		self.log(f"🗑️ {len(faces)} visage{'s' if len(faces) != 1 else ''} écarté{'s' if len(faces) != 1 else ''}")
+		self.after_faces_changed(origin)
 
 	# ---------- Écriture des métadonnées (thread de travail) ----------
 
-	def collect_updates(self) -> dict[str, list[tuple[str, FaceRecord]]]:
-		"""Regroupe par photo les (nom, visage) à écrire : personnes nommées et non ignorées."""
+	def collect_updates(self, persons: list[Person]) -> dict[str, list[tuple[str, FaceRecord]]]:
+		"""Regroupe par photo les (nom, visage) à écrire pour les personnes données (nommées et non ignorées).
+		Seules les photos où le nom manque encore sont retenues : les autres sont déjà à jour."""
 		updates: dict[str, list[tuple[str, FaceRecord]]] = {}
-		for person in self.library.persons.values():
-			if person.name and not person.ignored:
-				for face in person.faces:
+		for person in persons:
+			if not person.name or person.ignored:
+				continue
+			missing = set(self.missing_photos(person))
+			for face in person.faces:
+				if face.photo in missing:
 					updates.setdefault(face.photo, []).append((person.name, face))
 		return updates
 
-	def start_write(self) -> None:
+	def can_write(self) -> bool:
+		"""Vérifie qu'une écriture est possible (ExifTool présent, au moins une case « Écrire » cochée)."""
 		if not self.exiftool.available:
 			messagebox.showerror(
 				emoji("❌ ExifTool manquant"),
 				"Installez ExifTool pour écrire les métadonnées."
 			)
-			return
-		if not (self.write_regions_var.get() or self.write_person_var.get() or self.write_keywords_var.get()):
+			return False
+		if not any(self.write_fields()):
 			messagebox.showinfo(
 				emoji("💾 Écriture"),
 				"Cochez au moins un type de métadonnées à écrire."
 			)
+			return False
+		return True
+
+	def backup_note(self) -> str:
+		"""Rappel de la sauvegarde *_original, ajouté aux demandes de confirmation."""
+		if self.backup_var.get():
+			return "\nUne copie *_original de chaque photo sera conservée."
+		return "\n⚠️ Les photos seront modifiées sans copie de sauvegarde."
+
+	def validate_person(self) -> None:
+		"""Écrit dans les métadonnées le nom d'une seule personne, celle qui est sélectionnée, après vérification
+		de ses vignettes par l'utilisateur."""
+		selected = self.selected_persons()
+		if len(selected) != 1:
+			messagebox.showinfo(emoji("✅ Valider"), "Sélectionnez une seule personne.")
 			return
-		updates = self.collect_updates()
+		person = selected[0]
+		if not person.name:
+			messagebox.showinfo(emoji("✅ Valider"), "Nommez d'abord cette personne (double-clic dans la liste).")
+			return
+		if person.ignored:
+			messagebox.showinfo(emoji("✅ Valider"), "Cette personne est ignorée : réactivez-la d'abord.")
+			return
+		if not self.can_write():
+			return
+		updates = self.collect_updates([person])
+		if not updates:
+			messagebox.showinfo(
+				emoji("✅ Valider"),
+				emoji(f"✅ « {person.name} » figure déjà dans les métadonnées de ses {len(person.photos)} photo{'s' if len(person.photos) != 1 else ''}."),
+			)
+			return
+		count = len(updates)
+		if not messagebox.askyesno(
+			emoji("✅ Valider"),
+			emoji(f"Écrire « {person.name} » dans les métadonnées de {count} photo{'s' if count != 1 else ''} ?{self.backup_note()}"),
+		):
+			return
+		self.launch_write(updates)
+
+	def start_write(self) -> None:
+		"""Écrit d'un coup le nom de toutes les personnes nommées et non ignorées."""
+		if not self.can_write():
+			return
+		updates = self.collect_updates(list(self.library.persons.values()))
 		if not updates:
 			messagebox.showinfo(
 				emoji("💾 Écriture"),
-				"Aucune personne nommée à écrire. Nommez d'abord des personnes."
+				"Rien à écrire : aucune personne nommée, ou leurs noms figurent déjà dans toutes leurs photos."
 			)
 			return
 		names = {name for items in updates.values() for name, _ in items}
-		backup_note = "\nUne copie *_original de chaque photo sera conservée." if self.backup_var.get() else "\n⚠️ Les photos seront modifiées sans copie de sauvegarde."
 		if not messagebox.askyesno(
 			emoji("💾 Écriture"),
-			emoji(f"Écrire {len(names)} nom{'s' if len(names) != 1 else ''} dans les métadonnées de {len(updates)} photo{'s' if len(updates) != 1 else ''} ?{backup_note}"),
+			emoji(f"Écrire {len(names)} nom{'s' if len(names) != 1 else ''} dans les métadonnées de {len(updates)} photo{'s' if len(updates) != 1 else ''} ?{self.backup_note()}"),
 		):
 			return
+		self.launch_write(updates)
+
+	def launch_write(self, updates: dict[str, list[tuple[str, FaceRecord]]]) -> None:
+		"""Lance l'écriture dans un thread de travail (les cases sont lues ici, dans le thread de l'interface)."""
+		self.cancel_event.clear()
 		self.set_busy(True)
 		write_options = (
 			self.write_regions_var.get(),
@@ -2375,6 +2900,7 @@ class FaceTaggerApp(tk.Tk):
 					removed = {name_key(old) for old in replacements} - {name_key(name) for name in names}
 
 					def kept(existing: list[str]) -> list[str]:
+						"""Liste existante, sans les anciens noms remplacés par un renommage."""
 						return [name for name in existing if name_key(name) not in removed]
 
 					if write_person:
@@ -2463,7 +2989,8 @@ class FaceTaggerApp(tk.Tk):
 	def start_restore(self) -> None:
 		"""Restaure d'un coup toutes les photos d'un dossier à partir de leurs sauvegardes *_original."""
 		directory = filedialog.askdirectory(
-			initialdir = self.directory_var.get() or str(Path.home()), title = "Dossier contenant les fichiers *_original",
+			initialdir = self.base_directory(),
+			title = "Dossier contenant les fichiers *_original",
 		)
 		if not directory:
 			return
@@ -2527,6 +3054,11 @@ class FaceTaggerApp(tk.Tk):
 # ======================================================================================
 
 def parse_arguments() -> argparse.Namespace:
+	"""Lit les options de la ligne de commande.
+
+	Les valeurs par défaut qui dépendent d'autres options (seuil du modèle, chemin de la base) sont
+	complétées ensuite par main().
+	"""
 	parser = argparse.ArgumentParser(
 		description = "👥 Regroupe les visages d'un dossier de photos par personne et écrit les noms dans les métadonnées."
 	)
@@ -2538,7 +3070,7 @@ def parse_arguments() -> argparse.Namespace:
 	parser.add_argument(
 		"--data-directory",
 		default = str(Path.home() / ".face_tagger"),
-		help = "🗄️ Dossier des modèles ONNX et du cache",
+		help = "🗄️ Dossier des modèles de DeepFace et de la base",
 	)
 	parser.add_argument(
 		"--database",
@@ -2557,10 +3089,22 @@ def parse_arguments() -> argparse.Namespace:
 		help = "🔧 Chemin ou nom de l'exécutable ExifTool",
 	)
 	parser.add_argument(
+		"--model",
+		choices = list(RECOGNITION_MODELS),
+		default = DEFAULT_MODEL,
+		help = f"🧠 Modèle de reconnaissance de DeepFace (défaut {DEFAULT_MODEL})",
+	)
+	parser.add_argument(
+		"--detector",
+		choices = DETECTOR_BACKENDS,
+		default = DEFAULT_DETECTOR,
+		help = f"🔍 Détecteur de visages de DeepFace (défaut {DEFAULT_DETECTOR} ; yunet est environ dix fois plus rapide)",
+	)
+	parser.add_argument(
 		"--threshold",
 		type = float,
-		default = 0.40,
-		help = "🎚️ Seuil de similarité cosinus (0.20 à 0.70, défaut 0.40)",
+		default = None,
+		help = f"🎚️ Seuil de similarité cosinus ({THRESHOLD_MIN:.2f} à {THRESHOLD_MAX:.2f} ; défaut : celui du modèle, {RECOGNITION_MODELS[DEFAULT_MODEL]:.2f} pour {DEFAULT_MODEL})",
 	)
 	parser.add_argument(
 		"--max-image-size",
@@ -2600,15 +3144,25 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
+	"""Point d'entrée : prépare la console, lit les options puis ouvre la fenêtre principale."""
+	# Exécutable fenêtré (PyInstaller --noconsole) : sys.stdout et sys.stderr valent None. Les barres de progression
+	# des téléchargements de DeepFace (tqdm) y écriraient et lèveraient une exception : ils sont redirigés vers le
+	# néant. Doit précéder l'analyse des arguments, qui écrit ses erreurs sur sys.stderr.
+	for name in ("stdout", "stderr"):
+		if getattr(sys, name) is None:
+			setattr(sys, name, open(os.devnull, "w", encoding = "utf-8"))
+	# Évite les erreurs d'encodage des emojis dans les consoles Windows, y compris dans l'aide de --help
+	for stream in (sys.stdout, sys.stderr):
+		if hasattr(stream, "reconfigure"):
+			stream.reconfigure(encoding = "utf-8", errors = "replace")
 	options = parse_arguments()
 	SETTINGS["emoji"] = not options.no_emoji
 	# « auto » ne suit que Windows : sous macOS, le thème natif de Tk suit déjà le mode sombre du système
 	SETTINGS["dark"] = options.theme == "dark" or (options.theme == "auto" and windows_prefers_dark())
-	# Évite les erreurs d'encodage des emojis dans les consoles Windows
-	for stream in (sys.stdout, sys.stderr):
-		if hasattr(stream, "reconfigure"):
-			stream.reconfigure(encoding = "utf-8", errors = "replace")
-	options.threshold = min(max(options.threshold, 0.20), 0.70)
+	# Sans seuil explicite, celui qui convient au modèle choisi : leurs échelles de ressemblance diffèrent
+	if options.threshold is None:
+		options.threshold = RECOGNITION_MODELS[options.model]
+	options.threshold = min(max(options.threshold, THRESHOLD_MIN), THRESHOLD_MAX)
 	if not options.database:
 		options.database = str(Path(options.data_directory).expanduser() / "face_tagger.sqlite")
 	app = FaceTaggerApp(options)

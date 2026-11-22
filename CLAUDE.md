@@ -1,6 +1,6 @@
 # FaceTagger — instructions pour Claude Code
 
-Utilitaire Python à interface graphique (Tkinter) : il parcourt un dossier de photos (sous-dossiers compris), détecte les visages, les **regroupe par personne**, reprend les noms déjà présents dans les métadonnées des photos, propose de **nommer les personnes inconnues**, puis **écrit les noms dans les métadonnées** (via ExifTool).
+Utilitaire Python à interface graphique (Tkinter) : il parcourt un dossier de photos (sous-dossiers compris) ou quelques photos choisies, détecte les visages avec **DeepFace**, les **regroupe par personne**, reprend les noms déjà présents dans les métadonnées des photos, propose de **nommer les personnes inconnues**, puis **écrit les noms dans les métadonnées** (via ExifTool), **une personne à la fois** après vérification de ses vignettes.
 
 - Cible principale : **Windows** (binaires Linux et macOS aussi produits par GitHub Actions).
 - Dépôt : https://github.com/ILPlais/FaceTagger — licence MIT — auteur : PLAIS Lionel.
@@ -21,6 +21,7 @@ Utilitaire Python à interface graphique (Tkinter) : il parcourt un dossier de p
 - Options de ligne de commande en **noms longs** (`--directory`, jamais `-d`), y compris dans les commandes documentées (`pip install --requirement requirements.txt`, `git commit --message`).
 - Messages affichés par les programmes (console, journal, boîtes de dialogue, boutons) : **avec des emojis** (✅ ❌ ⚠️ 🔍 …). L'option `--no-emoji` doit continuer à fonctionner : tout texte passe par `emoji()` (ou est traité par `strip_widget_emoji()` pour les widgets).
 - Code **bien commenté** : docstrings et commentaires en français, qui expliquent le *pourquoi* et pas seulement le *quoi*.
+- **Docstring** pour chaque module, classe, fonction et méthode (y compris les fonctions imbriquées) ; **annotations de type** pour tous les paramètres et retours (`-> None` compris, `__init__` aussi), les constantes de module et chaque attribut d'instance à sa première affectation (`self.page: int = 0`). Variables locales typées quand le type ne se lit pas (conteneur vide, `None` initial, `json.loads`). Les trois fichiers ont `from __future__ import annotations` : les annotations ne sont pas évaluées à l'exécution, mais doivent se résoudre (vérifié avec `typing.get_type_hints`). Le module DeepFace est typé `ModuleType`, la base de `restore_originals` `Optional[Database]` (import sous `TYPE_CHECKING`).
 - Messages de commit en français, dans le style existant (« Ajoute … », « Suppression de … »). **Ne jamais commiter ni pousser sans demande explicite.**
 - Rester compatible **Python 3.11** (version utilisée par la CI) même si le `.venv` local est en 3.14 : pas de syntaxe plus récente. Vérifié : les trois fichiers compilent en 3.11.
 
@@ -40,11 +41,11 @@ python face_tagger.py --directory "D:\Photos"
 ```
 
 - Tkinter n'est pas sur PyPI : il est fourni par l'installeur de python.org (case « tcl/tk and IDLE »). Contrôle : `python -m tkinter`.
-- Ne jamais installer `opencv-python` et `opencv-python-headless` ensemble.
-- Versions dans le `.venv` actuel : Python 3.14, OpenCV 5.0.0.93, NumPy 2.5.4, Pillow 13.0.0, pillow-heif 1.8.1, PyInstaller 6.22.3. (`ttkthemes` y est aussi installé mais n'est ni utilisé ni dans `requirements.txt`.)
-- Au premier lancement, les modèles ONNX (≈ 37 Mo) sont téléchargés dans `%USERPROFILE%\.face_tagger\models`.
+- Ne jamais installer `opencv-python` et `opencv-python-headless` (ou `opencv-contrib-python-headless`) ensemble. DeepFace dépend de `opencv-contrib-python-headless` : `opencv-python` a été désinstallé du `.venv`.
+- Versions dans le `.venv` actuel : Python 3.14, DeepFace 0.0.105, onnxruntime 1.32.0, opencv-contrib-python-headless 5.1.0.95, NumPy 2.5.4, Pillow 13.0.0, pillow-heif 1.8.1, PyInstaller 6.22.3. **Ni TensorFlow ni PyTorch** : DeepFace 0.0.105 s'exécute avec onnxruntime. (`ttkthemes` y est aussi installé mais n'est ni utilisé ni dans `requirements.txt`.)
+- Au premier lancement, DeepFace télécharge les poids (≈ 255 Mo : `arcface_weights.onnx` 137 Mo, `retinaface.onnx` 118 Mo) dans `%USERPROFILE%\.face_tagger\.deepface\weights`. L'ancien dossier `models` (YuNet, SFace) ne sert plus.
 
-Options de `face_tagger.py` : `--directory`, `--data-directory` (défaut `~/.face_tagger`), `--database` (défaut `<data-directory>/face_tagger.sqlite`), `--page-size` (100), `--exiftool`, `--threshold` (0.40, borné entre 0.20 et 0.70), `--max-image-size` (2000), `--min-face-size` (40), `--detection-score` (0.80), `--no-backup`, `--no-emoji`, `--theme` (`auto`, `light` ou `dark` ; défaut `auto`, qui suit Windows).
+Options de `face_tagger.py` : `--directory`, `--data-directory` (défaut `~/.face_tagger`), `--database` (défaut `<data-directory>/face_tagger.sqlite`), `--page-size` (100), `--exiftool`, `--model` (`ArcFace` par défaut, voir `RECOGNITION_MODELS`), `--detector` (`retinaface` par défaut, voir `DETECTOR_BACKENDS`), `--threshold` (défaut : celui du modèle, 0.32 pour ArcFace ; borné entre 0.20 et 0.80), `--max-image-size` (2000), `--min-face-size` (40), `--detection-score` (0.80), `--no-backup`, `--no-emoji`, `--theme` (`auto`, `light` ou `dark` ; défaut `auto`, qui suit Windows).
 
 Restauration des sauvegardes `*_original` d'ExifTool (aussi disponible par le bouton « Restaurer les sauvegardes… ») :
 
@@ -58,13 +59,14 @@ python restore_originals.py --directory "D:\Photos" --action delete --yes
 ## Compilation
 
 - **En local** : `pyinstaller face_tagger.spec` (onefile, `console = False`, icône, `version.txt`, `face_tagger.ico` en données). Le `.spec` est ignoré par git (`*.spec` dans `.gitignore`) : il n'existe que sur le poste de Lionel.
+- **DeepFace sous PyInstaller** : il faut `--collect-submodules deepface.models --collect-submodules deepface.modules` (DeepFace importe ses détecteurs et modèles par leur nom, avec `importlib`) et `--recursive-copy-metadata deepface` (sinon « No package metadata was found for gdown »). Ajoutés au workflow et au `.spec` local ; vérifié par la compilation réelle (onedir, console) d'un petit programme qui importe `face_tagger` et analyse une image. Le build en `--onefile` fenêtré complet n'a pas été refait.
 - **GitHub Actions** (`.github/workflows/build.yml`) : déclenché par la **publication d'une release** (`release: published`, Lionel les crée depuis la page Releases du site) ou **à la main** depuis l'onglet Actions (`workflow_dispatch`, en saisissant le tag). Matrice ubuntu / macos / windows, Python 3.11. Il appelle `pyinstaller --onefile` directement (sans le `.spec`) et publie `dist/*` dans la Release.
 	- L'ancien déclencheur `push: tags` ne partait pas, et aucun nouveau tag n'existait sur GitHub. Causes probables (non vérifiées, faute d'accès à l'onglet Actions) : une release en **brouillon** ne crée pas son tag, et une release qui reprend un tag existant ne pousse aucun tag. Une release brouillon ne déclenche aucun workflow : il faut la **publier**.
 	- GitHub lit le workflow **dans le commit du tag** : les tags `v1.0.0` et `v1.0.4` (posés sur `04d0e7c`) ont l'ancien déclencheur. Pour les recompiler, utiliser le lancement manuel.
 	- Le dépôt est **privé** : l'API GitHub répond 404 sans authentification, et `gh` n'est pas installé sur le poste.
 - Les trois fichiers `.py` restent **dans le même dossier** : PyInstaller embarque `face_database` et `restore_originals` grâce aux imports (vérifié par un build réel).
 - `version.txt` (infos de version Windows) est à **1.1.0.0**, comme le dernier tag **v1.1.0** : à resynchroniser à chaque publication, **avant** de poser le tag (le workflow compile le commit du tag).
-- En mode fenêtré (`--noconsole`), `sys.stdout` et `sys.stderr` valent `None` : `print()` reste sans effet (pas de plantage), mais les `sys.exit("message")` du démarrage sont invisibles. Amélioration possible : les afficher dans une `messagebox`.
+- En mode fenêtré (`--noconsole`), `sys.stdout` et `sys.stderr` valent `None` : `main()` les remplace par `os.devnull`, car les barres de progression des téléchargements de DeepFace (tqdm) y écrivent. Les `sys.exit("message")` du démarrage restent invisibles. Amélioration possible : les afficher dans une `messagebox`.
 - Icône : `iconbitmap(default = …)` (les boîtes de dialogue en héritent) ; avec un `.ico`, l'appel lève une `TclError` sous Linux/macOS et est donc protégé par `try/except`. `resource_path()` lit `sys._MEIPASS` sous PyInstaller, sinon le **dossier du script** : l'ancienne version cherchait dans le dossier courant, et une fois lancée hors du dépôt, l'application montrait la plume de Tk dans la barre des tâches (vérifié par capture d'écran).
 - Barre des tâches de Windows : `set_windows_app_id()` déclare l'`AppUserModelID` `ILPlais.FaceTagger` avant la création de la fenêtre. Sinon, lancée par `python face_tagger.py`, la fenêtre est rattachée à python.exe, et en mode « regrouper les boutons » Windows affiche l'icône de Python (comportement documenté, non reproduit : la barre des tâches de Lionel ne regroupe jamais).
 
@@ -80,18 +82,18 @@ python restore_originals.py --directory "D:\Photos" --action delete --yes
 Sections de `face_tagger.py`, dans l'ordre :
 
 1. **Constantes** : extensions, URL des modèles, `TAGS_TO_READ` (étiquettes lues par ExifTool).
-2. **Utilitaires** : `emoji`, `resource_path`, `normalize_name`, `name_key`, `merge_unique`, `iou`, `list_photos`, `make_thumbnail`, `encode_thumbnail` / `decode_thumbnail`, `ensure_models`.
+2. **Utilitaires** : `emoji`, `resource_path`, `normalize_name`, `name_key`, `merge_unique`, `iou`, `list_photos`, `make_thumbnail`, `encode_thumbnail` / `decode_thumbnail`, `load_deepface`.
 3. **ExifTool** : `PhotoTags`, `parse_photo_tags`, classe `ExifTool` (`read_tags`, `write_tags`).
-4. **Détection et reconnaissance** : `FaceEngine` (YuNet pour la détection, SFace pour l'empreinte à 128 dimensions, via OpenCV).
+4. **Détection et reconnaissance** : `FaceEngine` (DeepFace : `build_model` à la création, puis `represent` par photo, qui détecte, aligne et calcule l'empreinte).
 5. **Modèle de données** : `FaceRecord`, `Person`, `cluster_faces`, `Library` (`label_faces`, `rebuild`, `rename`, `merge`, `move_face`, `delete_face`).
-6. **Métadonnées à écrire** : `build_region_info`, `check_written`.
+6. **Métadonnées à écrire** : `build_region_info`, `check_written`, `photos_missing_name`.
 7. **Interface** : `ToolTip`, `photo_caption`, `NameDialog`, `PhotoViewer`, `UnknownNamesDialog`, `FaceTaggerApp`.
 8. **Ligne de commande** : `parse_arguments`, `main`.
 
 ### Flux de données
 
-- **Analyse** (thread, `scan_worker`) : `list_photos` → signatures en base → `FaceEngine.analyse` seulement pour les photos nouvelles ou modifiées → `Database.store_analysis` → étiquettes lues en base, sinon par ExifTool → `Library.label_faces` → `Library.rebuild` → événement `library` vers l'interface.
-- **Écriture** (thread, `write_worker`) : `collect_updates` → un enregistrement par photo, fusionné avec les étiquettes existantes → `ExifTool.write_tags` par lots de 25 → relecture → `check_written` → mise à jour de la base (signature, étiquettes, historique).
+- **Analyse** (thread, `scan_worker`) : `list_photos` (ou les photos choisies par « Photos… ») → signatures en base → `FaceEngine.analyse` seulement pour les photos nouvelles ou modifiées → `Database.store_analysis` → étiquettes lues en base, sinon par ExifTool → `Library.label_faces` → `Library.rebuild` → événement `library` vers l'interface.
+- **Écriture** (thread, `write_worker`) : `validate_person` (une personne) ou `start_write` (toutes) → `collect_updates(persons)`, qui ne retient que les photos où le nom **manque encore** (`photos_missing_name`) → `launch_write` → un enregistrement par photo, fusionné avec les étiquettes existantes → `ExifTool.write_tags` par lots de 25 → relecture → `check_written` → mise à jour de la base (signature, étiquettes, historique) → événement `tags`, qui met à jour la colonne « Métadonnées ».
 
 ## Décisions et pièges à connaître
 
@@ -106,7 +108,8 @@ Sections de `face_tagger.py`, dans l'ordre :
 
 ### Regroupement des visages
 
-- Similarité cosinus, seuil 0.40 par défaut (curseur de 0.20 à 0.70).
+- Similarité cosinus. Chaque modèle a son échelle : le seuil par défaut est celui de DeepFace pour ce modèle (`deepface/config/threshold.py`, distance cosinus convertie en similarité), dans `RECOGNITION_MODELS` : ArcFace 0.32, Facenet512 0.70, SFace 0.41… Curseur de 0.20 à 0.80.
+- Sur les images d'exemple de DeepFace (`tests/unit/dataset`), ArcFace + RetinaFace au seuil 0.32 regroupe bien les 8 visages d'une même personne. Vitesse mesurée sur le processeur : RetinaFace ≈ 3,5 s par photo, YuNet ≈ 0,35 s (mêmes visages trouvés), CenterFace ≈ 3 s.
 - Les visages déjà étiquetés (régions) sont regroupés **par nom d'abord** ; deux groupes portant des noms différents ne fusionnent **jamais**.
 - Les noms sans position (`PersonInImage`, et mots-clés si la case est cochée) sont attribués à un groupe seulement s'ils figurent dans ≥ 60 % de ses photos et dominent nettement (le 2ᵉ candidat ≤ la moitié du 1ᵉʳ) ; un nom n'est donné qu'à un seul groupe.
 
@@ -115,7 +118,7 @@ Sections de `face_tagger.py`, dans l'ordre :
 - Mode WAL, **une connexion par thread** (`threading.local`) : ne jamais partager une connexion entre threads.
 - Tables : `meta`, `photos` (signature = `mtime_ns` + taille, `tags_json` = JSON brut d'ExifTool), `faces` (position, empreinte `float32` × 128 en BLOB, vignette JPEG), `modifications` (historique, `backup_path`, `restored_at`).
 - Les vignettes ne sont chargées **qu'à la demande** (cache LRU de 3000). Une photo inchangée n'est ni ré-analysée ni relue.
-- `reset_analysis_if_needed` invalide les visages si les paramètres de détection changent (les étiquettes restent valables). Après une écriture, la signature est mise à jour (les pixels n'ont pas changé : les visages restent valables) ; après une restauration, les étiquettes mémorisées sont oubliées.
+- `reset_analysis_if_needed` invalide les visages si le moteur ou les paramètres de détection changent (signature `deepface|moteur|modèle|détecteur|taille|visage min|score` ; les étiquettes restent valables). Les empreintes de modèles différents ne sont pas comparables, et leur dimension varie (128 à 4096) : le BLOB `embedding` n'a pas de taille fixe. Après une écriture, la signature est mise à jour (les pixels n'ont pas changé : les visages restent valables) ; après une restauration, les étiquettes mémorisées sont oubliées.
 - Si le schéma change : incrémenter `SCHEMA_VERSION` **et** écrire une migration.
 
 ### Interface
@@ -123,6 +126,9 @@ Sections de `face_tagger.py`, dans l'ordre :
 - Les threads de travail **ne touchent jamais Tk** : ils envoient des événements avec `self.post(...)` (file `queue.Queue`), lus par `poll_events` toutes les 100 ms.
 - Conserver une référence à chaque `ImageTk.PhotoImage` (`icon_cache`, `face_images`), sinon l'image disparaît.
 - Affichage **paginé** (`render_page`, 50 / 100 / 200 / 500 par page) : seules les vignettes de la page courante sont en mémoire.
+- **Sélection de plusieurs vignettes** : `selected_faces` (ensemble de `FaceRecord`, comparés par identité), `selection_anchor` (rang dans `sorted_faces`, pour Maj + clic, pages précédentes comprises), `face_widgets` (vignettes de la page). Clic, Ctrl + clic, Maj + clic sur une vignette ; Ctrl + A, Échap et Suppr sont liés au **canevas**, qui prend le focus à chaque clic. La sélection est vidée quand la personne affichée change. Les vignettes sélectionnées prennent le style `SelectedFace.TLabel` (couleurs dans `SELECTION_COLORS`). Le menu contextuel agit sur toute la sélection si la vignette cliquée en fait partie.
+- **Validation par personne** : le bouton « Valider la personne » n'est actif que pour une seule personne nommée et non ignorée (`update_action_states`, appelée aussi par `set_busy`). La colonne « Métadonnées » (`person_status`) dépend des cases « Écrire » : elle est recalculée par `update_person_statuses` (sans reconstruire la liste) à chaque changement de case et après chaque écriture. « Tout écrire… » reste disponible.
+- **Photos choisies** : « Photos… » remplit `chosen_photos` et affiche `chosen_label` dans le champ « Dossier » ; tant que le champ affiche ce libellé, « Analyser » traite ces photos (`using_chosen_photos`). Les chemins passent par `os.path.abspath`, comme ceux de `list_photos`, pour retrouver les mêmes clés en base.
 - **Thème sombre** : avec `--theme auto`, il est choisi d'après la valeur `AppsUseLightTheme` du registre ; sous macOS, `auto` garde le thème natif, qui suit déjà le système. `apply_dark_theme()` passe ttk sur le thème `clam` (les thèmes natifs `vista` et `winnative` ne se recolorent pas) et remplit la base d'options pour les widgets Tk classiques : elle doit donc être appelée **avant** la création des widgets. Le thème clair garde le thème natif. Les couleurs sont dans `DARK_COLORS`.
 	- Barre de titre : appeler `set_title_bar_theme()` (attribut DWM 20) pour **chaque** fenêtre, y compris toute nouvelle boîte de dialogue.
 	- Le journal est un `tk.Text` avec un `ttk.Scrollbar`, car l'ascenseur natif de `ScrolledText` ne se recolore pas.
@@ -137,20 +143,26 @@ Sections de `face_tagger.py`, dans l'ordre :
 	- Le texte passe par `emoji()` ligne par ligne, et U+FE0F en est retiré : Tk dessine ce sélecteur de variante comme un blanc d'environ 21 px après 🏷️, 🖼️, 🖱️, ✏️, ⬆️… (mesuré). Les textes des autres widgets ont encore ce blanc (« 🏷️ étiquette » dans la liste, « 🎚️ Seuil de similarité »).
 	- `EMOJI_PATTERN` ne couvre pas tous les emojis : ℹ️ (U+2139), ◀️ et ▶️ (U+25C0, U+25B6) restent avec `--no-emoji`. Vérifier qu'un nouvel emoji est dans ses plages.
 
-### Modèles et OpenCV
+### Modèles et DeepFace
 
-- YuNet (`face_detection_yunet_2023mar.onnx`) et SFace (`face_recognition_sface_2021dec.onnx`), du dépôt `opencv_zoo`, téléchargés dans `~/.face_tagger/models`. Sur GitHub ces fichiers sont en **Git LFS** (redirection vers `media.githubusercontent.com`) : `MODEL_MIN_SIZE` détecte un simple pointeur LFS.
-- L'API `FaceDetectorYN` / `FaceRecognizerSF` est identique en OpenCV 4.x et 5.0 (vérifié). **OpenCV 5.0 n'a plus `CascadeClassifier`** : ne pas l'utiliser, notamment dans des tests.
+- DeepFace est importé **à la première analyse** (`load_deepface`), pas au démarrage : son import (onnxruntime, OpenCV) prend plusieurs secondes.
+- `load_deepface` fixe `DEEPFACE_HOME` (dossier de données) et `DEEPFACE_BACKEND_ENGINE` (`onnx`) **avant** l'import, sauf si l'utilisateur les a définis. Une valeur **vide** compte comme absente : avec `DEEPFACE_HOME=""`, DeepFace créait un `.deepface` relatif au dossier courant (constaté).
+- Sans `DEEPFACE_BACKEND_ENGINE`, DeepFace préférerait TensorFlow puis PyTorch s'ils sont installés : les empreintes seraient légèrement différentes.
+- L'image est passée à `represent` en tableau **BGR** déjà redressé (`exif_transpose`) : le chemin passerait par `cv2.imread`, qui échoue sur les chemins accentués sous Windows. `enforce_detection = False` : sans visage, DeepFace renvoie l'image entière avec une confiance nulle, écartée par `confidence <= 0`.
+- Le logger de DeepFace écrit des emojis sur `sys.stdout` : une console en cp1252 lève `UnicodeEncodeError` (constaté dans un programme de test). `main()` passe la console en UTF-8.
 
 ## Tests
 
-**Il n'y a pas encore de tests automatisés dans le dépôt.** Lors du développement (sous Linux, avec un faux moteur de détection) ont été vérifiés : regroupement, attribution des noms, écriture et relecture des métadonnées (accents inclus), idempotence de l'écriture, base SQLite, restauration, pagination, flux complet de l'interface, build PyInstaller. Les **vrais modèles ONNX n'ont pas été exécutés** en dehors de l'ordinateur de Lionel.
+**Il n'y a pas encore de tests automatisés dans le dépôt.** Lors du développement (sous Linux, avec un faux moteur de détection) ont été vérifiés : regroupement, attribution des noms, écriture et relecture des métadonnées (accents inclus), idempotence de l'écriture, base SQLite, restauration, pagination, flux complet de l'interface, build PyInstaller.
+
+Passage à DeepFace (novembre 2026), vérifié sous Windows avec les **vrais modèles** sur les images d'exemple publiques de DeepFace (copies, dossier temporaire) : téléchargement des poids, détection, regroupement, analyse complète par l'interface, sélection simple / Ctrl / Maj / tout / aucune, déplacement, détachement, mise à l'écart, validation d'une personne (seules ses photos sont écrites, `*_original` créés, seconde validation « déjà à jour »), analyse de photos choisies, capture de l'interface en thème sombre, programme compilé par PyInstaller. Non vérifiés : le thème clair et `--no-emoji` avec les nouveaux widgets, l'exécutable `--onefile --noconsole` complet, la CI (Linux, macOS, Python 3.11).
 
 Pour en ajouter (pytest, dossier `tests/`) :
 
 - Fonctions pures : `cluster_faces` (empreintes synthétiques), `parse_photo_tags`, `build_region_info`, `check_written`, `iou`.
 - `Database` et `restore_originals` : sur des **copies** de photos, avec ExifTool.
-- Interface : remplacer `face_tagger.FaceEngine` et `face_tagger.ensure_models` par un faux moteur renvoyant des empreintes synthétiques (octets `float32` × 128) et des vignettes JPEG ; remplacer `messagebox.askyesno` ; piloter `start_scan`, `start_write`, `start_restore` ; sous Linux, utiliser `xvfb-run`.
+- Interface : remplacer `face_tagger.FaceEngine` et `face_tagger.load_deepface` par un faux moteur renvoyant des empreintes synthétiques (octets `float32`) et des vignettes JPEG ; remplacer `messagebox.askyesno` et `NameDialog` ; piloter `start_scan`, `click_face`, `move_selected_faces`, `validate_person`, `start_write`, `start_restore` ; sous Linux, utiliser `xvfb-run`.
+- Images de test publiques : `https://raw.githubusercontent.com/serengil/deepface/master/tests/unit/dataset/img1.jpg` (et `img2` à `img10`, `couple.jpg`).
 - **Ne jamais tester sur de vraies photos** : toujours des copies, en gardant les `*_original`.
 - Vérification visuelle sous Windows (méthode déjà employée pour le thème sombre et la haute résolution) :
 	- lancer avec un `--data-directory` temporaire ;
@@ -162,7 +174,8 @@ Pour en ajouter (pytest, dossier `tests/`) :
 ## Points à traiter
 
 - Ajouter des tests et compléter le `README.md` (installation, usage, captures).
-- Supprimer la constante `MAX_FACES_SHOWN` (inutilisée depuis la pagination) et le fichier obsolète `~/.face_tagger/faces_cache.pkl` (ancien cache de la v1).
+- Supprimer le fichier obsolète `~/.face_tagger/faces_cache.pkl` (ancien cache de la v1) et, désormais, le dossier `~/.face_tagger/models` (modèles YuNet et SFace de la version OpenCV).
 - Afficher dans une `messagebox` les erreurs de démarrage en mode fenêtré.
 - Retirer U+FE0F des textes des widgets (blanc après certains emojis, voir « Infobulles ») et compléter `EMOJI_PATTERN` (ℹ️ notamment, déjà employé dans les messages).
+- Vérifier la CI après le passage à DeepFace (taille des exécutables, `onnxruntime` sous macOS).
 - Tester les vrais modèles sur un petit dossier de photos (copies), avec la sauvegarde `*_original` activée.

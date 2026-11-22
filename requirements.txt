@@ -1,4 +1,4 @@
-opencv-python
+deepface
 pillow
 pillow-heif
 numpy

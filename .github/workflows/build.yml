@@ -55,6 +55,13 @@ jobs:
       shell: bash
 
     # ------------------------------------------------------------------
+    # Options communes, pour DeepFace :
+    # - --collect-submodules : DeepFace charge ses détecteurs et ses modèles
+    #   par leur nom (importlib), ce que PyInstaller ne détecte pas seul ;
+    # - --recursive-copy-metadata : gdown, utilisé par DeepFace pour
+    #   télécharger les poids des modèles, lit ses propres métadonnées.
+    # Vérifié par une compilation réelle sous Windows.
+    # ------------------------------------------------------------------
     # Compilation sous Windows (séparateur ';' et support de --version-file)
     # ------------------------------------------------------------------
     - name: Build Executable (Windows)
@@ -64,6 +71,9 @@ jobs:
           --icon=face_tagger.ico \
           --version-file=version.txt \
           --add-data "face_tagger.ico;." \
+          --collect-submodules deepface.models \
+          --collect-submodules deepface.modules \
+          --recursive-copy-metadata deepface \
           face_tagger.py
       shell: bash
 
@@ -77,6 +87,9 @@ jobs:
         pyinstaller --onefile \
           --icon=face_tagger.ico \
           --add-data "face_tagger.ico:." \
+          --collect-submodules deepface.models \
+          --collect-submodules deepface.modules \
+          --recursive-copy-metadata deepface \
           face_tagger.py
       shell: bash
 

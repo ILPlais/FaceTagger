@@ -23,11 +23,15 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+	# Pour les annotations seulement : la base est facultative, ce script reste utilisable sans elle
+	from face_database import Database
 
 # Suffixe ajouté par ExifTool aux sauvegardes, et extensions d'images concernées
-BACKUP_SUFFIX = "_original"
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"}
+BACKUP_SUFFIX: str = "_original"
+IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"}
 
 
 def find_backups(directory: str) -> list[tuple[str, str]]:
@@ -46,7 +50,7 @@ def find_backups(directory: str) -> list[tuple[str, str]]:
 	return backups
 
 
-def restore_backups(backups: list[tuple[str, str]], database: Optional[object] = None, log: Callable[[str], None] = print,
+def restore_backups(backups: list[tuple[str, str]], database: Optional[Database] = None, log: Callable[[str], None] = print,
 					dry_run: bool = False) -> tuple[int, int]:
 	"""Remplace chaque photo par sa sauvegarde. Retourne (nombre de réussites, nombre d'échecs)."""
 	done = failed = 0
@@ -67,7 +71,7 @@ def restore_backups(backups: list[tuple[str, str]], database: Optional[object] =
 	return done, failed
 
 
-def delete_backups(backups: list[tuple[str, str]], database: Optional[object] = None, log: Callable[[str], None] = print,
+def delete_backups(backups: list[tuple[str, str]], database: Optional[Database] = None, log: Callable[[str], None] = print,
 				dry_run: bool = False) -> tuple[int, int]:
 	"""Supprime les fichiers de sauvegarde (les photos modifiées sont conservées)."""
 	done = failed = 0
@@ -86,7 +90,7 @@ def delete_backups(backups: list[tuple[str, str]], database: Optional[object] = 
 	return done, failed
 
 
-def update_database(database, action: str, backup: str, target: str, log: Callable[[str], None]) -> None:
+def update_database(database: Optional[Database], action: str, backup: str, target: str, log: Callable[[str], None]) -> None:
 	"""Répercute l'opération dans la base SQLite (une erreur de base n'interrompt jamais la restauration)."""
 	if database is None:
 		return
@@ -120,6 +124,7 @@ def choose_directory() -> str:
 
 
 def parse_arguments() -> argparse.Namespace:
+	"""Lit les options de la ligne de commande."""
 	parser = argparse.ArgumentParser(description = "♻️ Restaure ou supprime d'un coup les sauvegardes *_original créées par ExifTool.")
 	parser.add_argument("--directory", default = "", help = "📁 Dossier à parcourir (sous-dossiers compris) ; sélecteur graphique si absent")
 	parser.add_argument("--action", choices = ("restore", "delete"), default = "restore",
@@ -132,6 +137,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> int:
+	"""Point d'entrée en ligne de commande. Retourne le code de sortie du programme (0 : succès)."""
 	options = parse_arguments()
 	# Évite les erreurs d'encodage des emojis dans les consoles Windows
 	for stream in (sys.stdout, sys.stderr):
@@ -165,7 +171,7 @@ def main() -> int:
 			return 0
 
 	# La base n'est utilisée que si elle existe déjà et si le module est disponible
-	database: Optional[object] = None
+	database: Optional[Database] = None
 	if Path(options.database).exists() and not options.dry_run:
 		try:
 			from face_database import Database

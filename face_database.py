@@ -25,11 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-SCHEMA_VERSION = 1
-THUMBNAIL_CACHE_SIZE = 3000   # Nombre de vignettes JPEG gardées en mémoire (cache LRU)
-QUERY_CHUNK = 500             # Taille des lots pour les requêtes « IN (…) »
+SCHEMA_VERSION: int = 1
+THUMBNAIL_CACHE_SIZE: int = 3000   # Nombre de vignettes JPEG gardées en mémoire (cache LRU)
+QUERY_CHUNK: int = 500             # Taille des lots pour les requêtes « IN (…) »
 
-SCHEMA = """
+SCHEMA: str = """
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS photos (
 	tags_json TEXT
 );
 
--- Un visage détecté : position normalisée, empreinte (128 flottants) et vignette JPEG
+-- Un visage détecté : position normalisée, empreinte (flottants de 32 bits, 128 à 4096 selon le modèle) et vignette JPEG
 CREATE TABLE IF NOT EXISTS faces (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	photo TEXT NOT NULL,
@@ -81,12 +81,16 @@ def utc_now() -> str:
 class Database:
 	"""Accès à la base SQLite de Face Tagger (utilisable depuis plusieurs threads)."""
 
-	def __init__(self, path: Path | str):
-		self.path = Path(path)
+	def __init__(self, path: Path | str) -> None:
+		"""Ouvre (ou crée) la base `path` et vérifie la version de son schéma.
+
+		Lève RuntimeError si la base a été créée par une version plus récente de Face Tagger.
+		"""
+		self.path: Path = Path(path)
 		self.path.parent.mkdir(parents = True, exist_ok = True)
-		self._local = threading.local()                       # Une connexion par thread
+		self._local: threading.local = threading.local()                       # Une connexion par thread
 		self._thumbnails: OrderedDict[int, bytes] = OrderedDict()
-		self._thumbnails_lock = threading.Lock()
+		self._thumbnails_lock: threading.Lock = threading.Lock()
 		self.connection.executescript(SCHEMA)
 		version = self.get_meta("schema_version")
 		if version is None:
@@ -117,10 +121,12 @@ class Database:
 	# ---------- Métadonnées de la base ----------
 
 	def get_meta(self, key: str) -> Optional[str]:
+		"""Valeur d'une clé de la table meta, ou None si elle est absente."""
 		row = self.connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
 		return row[0] if row else None
 
 	def set_meta(self, key: str, value: str) -> None:
+		"""Enregistre (ou remplace) la valeur d'une clé de la table meta."""
 		with self.connection as connection:
 			connection.execute(
 				"INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -270,6 +276,7 @@ class Database:
 	def statistics(self) -> dict[str, int]:
 		"""Quelques compteurs pour le journal."""
 		def count(query: str) -> int:
+			"""Exécute une requête de comptage et retourne son résultat."""
 			return self.connection.execute(query).fetchone()[0]
 		return {
 			"photos": count("SELECT COUNT(*) FROM photos"),

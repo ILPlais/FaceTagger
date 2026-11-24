@@ -3,3 +3,5 @@ pillow
 pillow-heif
 numpy
 pyinstaller
+# GPU sous Windows (DirectML) : DeepFace ne l'utilise que si DEEPFACE_ONNX_PROVIDERS le demande, ce que fait load_deepface
+onnxruntime-directml; sys_platform == "win32"

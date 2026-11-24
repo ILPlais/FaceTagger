@@ -396,6 +396,18 @@ def load_deepface(data_directory: Path) -> ModuleType:
 		os.environ["DEEPFACE_HOME"] = str(data_directory)
 	if not os.environ.get("DEEPFACE_BACKEND_ENGINE", "").strip():
 		os.environ["DEEPFACE_BACKEND_ENGINE"] = DEEPFACE_ENGINE
+	# Sous Windows, DeepFace ne prend DirectML (GPU de n'importe quel fabricant via DirectX 12) que si on le lui demande
+	# explicitement : par défaut il reste sur le processeur. On ne le demande que si onnxruntime-directml est installé,
+	# sinon DeepFace signalerait un avertissement inutile. Un réglage de l'utilisateur est toujours respecté.
+	if sys.platform == "win32" and not os.environ.get("DEEPFACE_ONNX_PROVIDERS", "").strip():
+		try:
+			import onnxruntime
+		except ImportError:
+			# Pas d'onnxruntime du tout : l'erreur sera signalée à l'import de DeepFace, plus bas
+			pass
+		else:
+			if "DmlExecutionProvider" in onnxruntime.get_available_providers():
+				os.environ["DEEPFACE_ONNX_PROVIDERS"] = "directml,cpu"
 	try:
 		from deepface import DeepFace
 	except ImportError as error:

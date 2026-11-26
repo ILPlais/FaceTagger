@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-face_tagger.py — Regroupe les visages d'une photothèque par personne et inscrit
-les noms dans les métadonnées des photos.
+"""Regroupe les visages d'une photothèque par personne et inscrit les noms dans les métadonnées des photos.
+
+Module face_tagger.py, application principale de Face Tagger :
 
 	1. Parcours récursif d'un dossier de photos, ou analyse de quelques photos choisies une à une.
-	2. Détection des visages et calcul d'une empreinte par visage avec DeepFace : détecteur
-		RetinaFace et modèle de reconnaissance ArcFace par défaut (--detector, --model), exécutés
-		par onnxruntime (ni TensorFlow, ni GPU requis).
+	2. Détection des visages et calcul d'une empreinte par visage avec DeepFace : détecteur RetinaFace et modèle de reconnaissance ArcFace par défaut (--detector, --model), exécutés par onnxruntime (ni TensorFlow, ni GPU requis).
 	3. Regroupement des visages par personne (similarité cosinus).
-	4. Les étiquettes déjà présentes dans les photos (régions de visages MWG / Microsoft,
-		PersonInImage, éventuellement mots-clés) servent à nommer automatiquement les groupes.
+	4. Les étiquettes déjà présentes dans les photos (régions de visages MWG / Microsoft, PersonInImage, éventuellement mots-clés) servent à nommer automatiquement les groupes.
 	5. Les personnes non reconnues peuvent être nommées à la main dans une boîte de dialogue.
-	6. Les vignettes d'une personne se sélectionnent à plusieurs (Ctrl / Maj + clic) pour être
-		déplacées, détachées ou écartées d'un coup.
-	7. Les noms sont validés personne par personne : ExifTool écrit XMP-iptcExt:PersonInImage, les
-		régions de visages XMP-mwg-rs, les mots-clés XMP-dc:Subject et EXIF XPKeywords (visible dans
-		l'Explorateur Windows), puis relit chaque photo pour vérifier que les noms y sont.
-	8. Une base SQLite (face_database.py) mémorise visages, vignettes, étiquettes lues et historique
-		des modifications : une photo inchangée n'est jamais ré-analysée ni relue.
-	9. Les visages d'une personne sont affichés page par page (seules les vignettes de la page
-		courante sont chargées en mémoire).
+	6. Les vignettes d'une personne se sélectionnent à plusieurs (Ctrl / Maj + clic) pour être déplacées, détachées ou écartées d'un coup.
+	7. Les noms sont validés personne par personne : ExifTool écrit XMP-iptcExt:PersonInImage, les régions de visages XMP-mwg-rs, les mots-clés XMP-dc:Subject et EXIF XPKeywords (visible dans l'Explorateur Windows), puis relit chaque photo pour vérifier que les noms y sont.
+	8. Une base SQLite (face_database.py) mémorise visages, vignettes, étiquettes lues et historique des modifications : une photo inchangée n'est jamais ré-analysée ni relue.
+	9. Les visages d'une personne sont affichés page par page (seules les vignettes de la page courante sont chargées en mémoire).
 	10. Les sauvegardes *_original d'ExifTool se restaurent d'un coup (bouton, ou restore_originals.py).
 	11. L'interface suit le mode sombre de Windows (ou --theme) et reste nette sur les écrans à haute résolution.
 	12. Une infobulle explique chaque commande, réglage et colonne de l'interface.
@@ -32,7 +24,7 @@ Dépendances :
 	ExifTool   (Fedora : sudo dnf install perl-Image-ExifTool)
 	Tkinter    (Fedora : sudo dnf install python3-tkinter)
 
-Exemple :
+Example:
 	python face_tagger.py --directory ~/Images --model ArcFace --detector retinaface
 """
 
@@ -63,9 +55,7 @@ if sys.platform == "win32":
 	# Lecture du thème de Windows (clair ou sombre)
 	import winreg
 
-# DeepFace n'est pas importé ici mais à la première analyse (voir load_deepface) : son import charge onnxruntime
-# et OpenCV, ce qui retarderait de plusieurs secondes l'ouverture de la fenêtre, même pour une photothèque déjà
-# analysée qui n'en a pas besoin.
+# DeepFace n'est pas importé ici mais à la première analyse (voir load_deepface) : son import charge onnxruntime et OpenCV, ce qui retarderait de plusieurs secondes l'ouverture de la fenêtre, même pour une photothèque déjà analysée qui n'en a pas besoin.
 try:
 	import numpy as np
 	from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
@@ -202,19 +192,34 @@ TAGS_TO_READ: list[str] = [
 # ======================================================================================
 
 def emoji(text: str) -> str:
-	"""Retourne le texte tel quel, ou débarrassé de ses emojis avec --no-emoji."""
+	"""Adapte un texte destiné à l'utilisateur à l'option --no-emoji.
+
+	Args:
+		text (str): Texte à afficher, avec ses emojis.
+
+	Returns:
+		str: Le texte tel quel ou, avec --no-emoji, débarrassé de ses emojis et des blancs à ses extrémités.
+	"""
 	if SETTINGS["emoji"]:
 		return text
 	return EMOJI_PATTERN.sub("", text).strip()
 
 def resource_path(relative_path: str) -> str:
-	"""Obtient le chemin absolu vers la ressource, fonctionne pour le dev et PyInstaller."""
+	"""Donne le chemin absolu d'une ressource livrée avec l'application (icône…).
+
+	Sous PyInstaller, les ressources sont extraites dans un dossier temporaire (`sys._MEIPASS`). En développement, elles sont cherchées dans le dossier du script, et non dans le dossier courant, pour être trouvées quel que soit le dossier de lancement.
+
+	Args:
+		relative_path (str): Chemin de la ressource, relatif au dossier de l'application.
+
+	Returns:
+		str: Chemin absolu de la ressource (son existence n'est pas vérifiée).
+	"""
 	try:
 		# PyInstaller crée un dossier temporaire et stocke le chemin dans _MEIPASS
 		base_path = sys._MEIPASS
 	except AttributeError:
-		# En développement : dossier du script, et non le dossier courant, pour trouver l'icône même quand
-		# l'application est lancée depuis un autre dossier (raccourci, autre terminal…)
+		# En développement : dossier du script, et non le dossier courant, pour trouver l'icône même quand l'application est lancée depuis un autre dossier (raccourci, autre terminal…)
 		base_path = os.path.dirname(os.path.abspath(__file__))
 
 	return os.path.join(base_path, relative_path)
@@ -223,10 +228,7 @@ def resource_path(relative_path: str) -> str:
 def set_windows_app_id() -> None:
 	"""Donne à l'application sa propre identité dans la barre des tâches de Windows.
 
-	Lancé par « python face_tagger.py », le programme est vu par Windows comme python.exe : la barre des
-	tâches regroupe alors sa fenêtre avec Python et affiche l'icône de Python au lieu de celle de la fenêtre.
-	Un identifiant d'application explicite (AppUserModelID) l'en sépare. L'identifiant vaut pour tout le
-	processus et doit être déclaré avant la création de la première fenêtre.
+	Lancé par « `python face_tagger.py` », le programme est vu par Windows comme `python.exe` : la barre des tâches regroupe alors sa fenêtre avec Python et affiche l'icône de Python au lieu de celle de la fenêtre. Un identifiant d'application explicite (`AppUserModelID`) l'en sépare. L'identifiant vaut pour tout le processus et doit être déclaré avant la création de la première fenêtre.
 	"""
 	if sys.platform != "win32":
 		return
@@ -240,17 +242,12 @@ def set_windows_app_id() -> None:
 def enable_dpi_awareness() -> None:
 	"""Déclare à Windows que l'application gère elle-même les écrans à haute résolution (125 %, 150 %…).
 
-	Sans cette déclaration, Windows dessine la fenêtre en 96 ppp puis l'agrandit comme une image : textes et
-	vignettes sont flous. Une fois déclarée, Tk mesure la vraie résolution et agrandit seul les polices ; les
-	tailles exprimées en pixels sont agrandies par scaled(). Le mode « système » est préféré au mode « par écran » :
-	Tk ne sait pas se redimensionner quand la fenêtre passe sur un écran d'une autre résolution, c'est alors
-	Windows qui s'en charge. Doit être appelée avant la création de la première fenêtre.
+	Sans cette déclaration, Windows dessine la fenêtre en 96 ppp puis l'agrandit comme une image : textes et vignettes sont flous. Une fois déclarée, Tk mesure la vraie résolution et agrandit seul les polices ; les tailles exprimées en pixels sont agrandies par scaled(). Le mode « système » est préféré au mode « par écran » : Tk ne sait pas se redimensionner quand la fenêtre passe sur un écran d'une autre résolution, c'est alors Windows qui s'en charge. Doit être appelée avant la création de la première fenêtre.
 	"""
 	if sys.platform != "win32":
 		return
 	try:
-		# PROCESS_SYSTEM_DPI_AWARE (Windows 8.1 et suivants). Un refus (déjà déclaré par le manifeste de
-		# l'exécutable) est renvoyé comme code d'erreur, sans exception : il est sans conséquence.
+		# PROCESS_SYSTEM_DPI_AWARE (Windows 8.1 et suivants). Un refus (déjà déclaré par le manifeste de l'exécutable) est renvoyé comme code d'erreur, sans exception : il est sans conséquence.
 		ctypes.windll.shcore.SetProcessDpiAwareness(1)
 	except (AttributeError, OSError):
 		try:
@@ -261,7 +258,13 @@ def enable_dpi_awareness() -> None:
 
 
 def windows_prefers_dark() -> bool:
-	"""Indique si Windows est réglé en mode sombre pour les applications (Paramètres > Personnalisation > Couleurs)."""
+	"""Indique si Windows est réglé en mode sombre pour les applications.
+
+	Le réglage (Paramètres > Personnalisation > Couleurs) est lu dans la valeur `AppsUseLightTheme` du registre.
+
+	Returns:
+		bool: `True` en mode sombre ; False en mode clair, hors de Windows, ou si la valeur est absente (Windows antérieur à 10).
+	"""
 	if sys.platform != "win32":
 		return False
 	try:
@@ -273,7 +276,13 @@ def windows_prefers_dark() -> bool:
 
 
 def strip_widget_emoji(widget: tk.Misc) -> None:
-	"""Retire récursivement les emojis des textes des widgets (option --no-emoji)."""
+	"""Retire récursivement les emojis des textes d'un widget et de ses enfants (option `--no-emoji`).
+
+	Sans `--no-emoji`, la fonction ne fait rien.
+
+	Args:
+		widget (tk.Misc): Widget (ou fenêtre) à traiter, enfants compris.
+	"""
 	if SETTINGS["emoji"]:
 		return
 	for child in widget.winfo_children():
@@ -287,17 +296,40 @@ def strip_widget_emoji(widget: tk.Misc) -> None:
 
 
 def normalize_name(name: str) -> str:
-	"""Supprime les espaces superflus : « Jean   Dupont » devient « Jean Dupont »."""
+	"""Supprime les espaces superflus d'un nom : « Jean␣␣␣Dupont » devient « Jean␣Dupont ».
+
+	Args:
+		name (str): Nom à nettoyer (une autre valeur est d'abord convertie en texte).
+
+	Returns:
+		str: Nom sans espace en tête, en fin ni en double.
+	"""
 	return " ".join(str(name).split())
 
 
 def name_key(name: str) -> str:
-	"""Clé de comparaison de deux noms, insensible à la casse et aux espaces."""
+	"""Calcule la clé de comparaison d'un nom, insensible à la casse et aux espaces superflus.
+
+	Args:
+		name (str): Nom à comparer.
+
+	Returns:
+		str: Clé de comparaison : « jean␣dupont » pour « Jean␣␣DUPONT ».
+	"""
 	return normalize_name(name).casefold()
 
 
 def merge_unique(*lists: Iterable[str]) -> list[str]:
-	"""Fusionne des listes de noms sans doublon (insensible à la casse), en gardant l'ordre."""
+	"""Fusionne des listes de noms sans doublon, en gardant l'ordre de première apparition.
+
+	Les doublons sont repérés sans tenir compte de la casse ni des espaces superflus ; les noms vides sont écartés.
+
+	Args:
+		*lists (Iterable[str]): Listes de noms à fusionner, dans l'ordre.
+
+	Returns:
+		list[str]: Noms normalisés (voir `normalize_name`), chacun présent une seule fois.
+	"""
 	seen: set[str] = set()
 	result: list[str] = []
 	for items in lists:
@@ -310,7 +342,16 @@ def merge_unique(*lists: Iterable[str]) -> list[str]:
 
 
 def as_list(value: object) -> list[str]:
-	"""Convertit une valeur renvoyée par ExifTool (rien, texte, nombre ou liste) en liste de textes."""
+	"""Convertit une valeur renvoyée par ExifTool en liste de textes.
+
+	ExifTool renvoie une valeur seule (texte ou nombre) quand un champ de type liste n'a qu'un élément.
+
+	Args:
+		value (object): Valeur lue : `None`, texte, nombre ou liste.
+
+	Returns:
+		list[str]: Liste vide pour `None`, liste des éléments convertis en textes, ou liste d'un seul élément.
+	"""
 	if value is None:
 		return []
 	if isinstance(value, list):
@@ -319,12 +360,27 @@ def as_list(value: object) -> list[str]:
 
 
 def path_key(path: str) -> str:
-	"""Clé normalisée d'un chemin, pour faire correspondre les chemins de Python et d'ExifTool."""
+	"""Calcule la clé normalisée d'un chemin, pour faire correspondre les chemins de Python et ceux d'ExifTool.
+
+	Args:
+		path (str): Chemin d'un fichier, quels que soient ses séparateurs.
+
+	Returns:
+		str: Chemin normalisé ; sous Windows, séparateurs et casse sont unifiés.
+	"""
 	return os.path.normcase(os.path.normpath(path))
 
 
 def iou(box_a: tuple, box_b: tuple) -> float:
-	"""Intersection sur union de deux rectangles (x, y, largeur, hauteur)."""
+	"""Calcule l'intersection sur union (IoU) de deux rectangles.
+
+	Args:
+		box_a (tuple): Premier rectangle (x, y, largeur, hauteur), (x, y) étant le coin supérieur gauche.
+		box_b (tuple): Second rectangle, dans le même repère.
+
+	Returns:
+		float: Aire commune divisée par l'aire réunie des deux rectangles, de `0.0` (disjoints) à `1.0` (identiques).
+	"""
 	ax, ay, aw, ah = box_a
 	bx, by, bw, bh = box_b
 	inter_w = min(ax + aw, bx + bw) - max(ax, bx)
@@ -336,7 +392,16 @@ def iou(box_a: tuple, box_b: tuple) -> float:
 
 
 def list_photos(directory: str) -> list[str]:
-	"""Liste récursivement les photos d'un dossier (dossiers et fichiers cachés ignorés)."""
+	"""Liste récursivement les photos d'un dossier.
+
+	Les dossiers et fichiers cachés (nom commençant par un point) sont ignorés, et seules les extensions de `IMAGE_EXTENSIONS` sont retenues.
+
+	Args:
+		directory (str): Dossier à parcourir, sous-dossiers compris.
+
+	Returns:
+		list[str]: Chemins des photos, triés par dossier puis par nom.
+	"""
 	photos: list[str] = []
 	for root, directories, files in os.walk(directory):
 		# Modifier la liste « directories » sur place permet d'élaguer le parcours
@@ -350,7 +415,16 @@ def list_photos(directory: str) -> list[str]:
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-	"""Charge une police lisible pour annoter les photos (police par défaut en dernier recours)."""
+	"""Charge une police lisible pour annoter les photos.
+
+	DejaVu Sans puis Arial sont essayées ; la police par défaut de Pillow sert en dernier recours.
+
+	Args:
+		size (int): Taille de la police, en pixels.
+
+	Returns:
+		ImageFont.FreeTypeFont | ImageFont.ImageFont: Police TrueType trouvée, ou police par défaut.
+	"""
 	for font_name in ("DejaVuSans.ttf", "arial.ttf", "Arial.ttf"):
 		try:
 			return ImageFont.truetype(font_name, size)
@@ -359,8 +433,19 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 	return ImageFont.load_default()
 
 
-def make_thumbnail(image: Image.Image, box: tuple[float, float, float, float]) -> Image.Image:
-	"""Découpe une vignette carrée autour d'un visage (avec une marge) pour l'affichage."""
+def make_thumbnail(
+		image: Image.Image,
+		box: tuple[float, float, float, float]
+	) -> Image.Image:
+	"""Découpe une vignette carrée autour d'un visage, avec une marge, pour l'affichage.
+
+	Args:
+		image (Image.Image): Photo redressée, à la taille utilisée pour la détection.
+		box (tuple[float, float, float, float]): Rectangle du visage, en pixels : (gauche, haut, droite, bas).
+
+	Returns:
+		Image.Image: Vignette carrée de `THUMBNAIL_SIZE` pixels de côté.
+	"""
 	x0, y0, x1, y1 = box
 	center_x, center_y = (x0 + x1) / 2, (y0 + y1) / 2
 	half = max(x1 - x0, y1 - y0) * 0.75
@@ -369,14 +454,28 @@ def make_thumbnail(image: Image.Image, box: tuple[float, float, float, float]) -
 
 
 def encode_thumbnail(image: Image.Image) -> bytes:
-	"""Encode une vignette en JPEG (stockée dans la base SQLite)."""
+	"""Encode une vignette en JPEG, pour la stocker dans la base SQLite.
+
+	Args:
+		image (Image.Image): Vignette à encoder.
+
+	Returns:
+		bytes: Contenu du fichier JPEG (qualité `85`).
+	"""
 	buffer = io.BytesIO()
 	image.save(buffer, format = "JPEG", quality = 85)
 	return buffer.getvalue()
 
 
 def decode_thumbnail(data: Optional[bytes]) -> Image.Image:
-	"""Décode une vignette JPEG de la base (carré gris si elle est absente)."""
+	"""Décode une vignette JPEG lue dans la base.
+
+	Args:
+		data (Optional[bytes]): Contenu JPEG de la vignette, ou `None` (ou vide) si elle est absente.
+
+	Returns:
+		Image.Image: Vignette en RVB, ou carré gris de `THUMBNAIL_SIZE` pixels si elle est absente.
+	"""
 	if not data:
 		return Image.new("RGB", (THUMBNAIL_SIZE, THUMBNAIL_SIZE), "#888888")
 	return Image.open(io.BytesIO(data)).convert("RGB")
@@ -385,20 +484,23 @@ def decode_thumbnail(data: Optional[bytes]) -> Image.Image:
 def load_deepface(data_directory: Path) -> ModuleType:
 	"""Importe DeepFace à la première analyse et lui indique où ranger ses modèles.
 
-	DeepFace télécharge lui-même les poids de chaque réseau à sa première utilisation (quelques centaines de Mo),
-	ici dans <data_directory>/.deepface/weights plutôt que dans le dossier personnel. Ses variables d'environnement
-	doivent être fixées AVANT l'import, car il les lit à ce moment-là ; une valeur déjà définie par l'utilisateur
-	est respectée.
+	DeepFace télécharge lui-même les poids de chaque réseau à sa première utilisation (quelques centaines de Mio), ici dans `<data_directory>/.deepface/weights` plutôt que dans le dossier personnel. Ses variables d'environnement doivent être fixées AVANT l'import, car il les lit à ce moment-là ; une valeur déjà définie par l'utilisateur est respectée. Sous Windows, le GPU est employé par DirectML si `onnxruntime-directml` est installé.
+
+	Args:
+		data_directory (Path): Dossier de données de l'application, où DeepFace crée son dossier « `.deepface` ».
+
+	Returns:
+		ModuleType: Le module `deepface.DeepFace`.
+
+	Raises:
+		RuntimeError: Si DeepFace, ou l'une de ses dépendances, ne peut pas être importé.
 	"""
-	# Une variable définie mais vide compte comme absente : DeepFace rangerait sinon ses modèles dans un dossier
-	# « .deepface » relatif au dossier courant
+	# Une variable définie mais vide compte comme absente : DeepFace rangerait sinon ses modèles dans un dossier « .deepface » relatif au dossier courant
 	if not os.environ.get("DEEPFACE_HOME", "").strip():
 		os.environ["DEEPFACE_HOME"] = str(data_directory)
 	if not os.environ.get("DEEPFACE_BACKEND_ENGINE", "").strip():
 		os.environ["DEEPFACE_BACKEND_ENGINE"] = DEEPFACE_ENGINE
-	# Sous Windows, DeepFace ne prend DirectML (GPU de n'importe quel fabricant via DirectX 12) que si on le lui demande
-	# explicitement : par défaut il reste sur le processeur. On ne le demande que si onnxruntime-directml est installé,
-	# sinon DeepFace signalerait un avertissement inutile. Un réglage de l'utilisateur est toujours respecté.
+	# Sous Windows, DeepFace ne prend DirectML (GPU de n'importe quel fabricant via DirectX 12) que si on le lui demande xplicitement : par défaut il reste sur le processeur. On ne le demande que si onnxruntime-directml est installé,sinon DeepFace signalerait un avertissement inutile. Un réglage de l'utilisateur est toujours respecté.
 	if sys.platform == "win32" and not os.environ.get("DEEPFACE_ONNX_PROVIDERS", "").strip():
 		try:
 			import onnxruntime
@@ -424,7 +526,17 @@ def load_deepface(data_directory: Path) -> ModuleType:
 
 @dataclass
 class PhotoTags:
-	"""Étiquettes déjà présentes dans une photo."""
+	"""Étiquettes déjà présentes dans une photo, lues par ExifTool.
+
+	Attributes:
+		regions (list[dict]): Régions de visages MWG et Microsoft, chacune avec les clés « `name` » (`str`, parfois vide) et « `box` » (x, y, largeur, hauteur normalisés, (x, y) étant le coin supérieur gauche).
+		region_info (Optional[dict]): Structure `XMP-mwg-rs:RegionInfo` brute, conservée pour la réécrire, ou `None`.
+		person_in_image (list[str]): Noms de `XMP-iptcExt:PersonInImage` (sans position).
+		subject (list[str]): Mots-clés `XMP-dc:Subject`.
+		keywords (list[str]): Mots-clés `IPTC:Keywords`.
+		xp_keywords (list[str]): Mots-clés EXIF `XPKeywords` de Windows.
+		raw (dict): Entrée JSON brute d'ExifTool, sans `SourceFile` (mémorisée dans la base).
+	"""
 	regions: list[dict] = field(default_factory = list)          # [{"name", "box"}], box = (x, y, l, h) normalisé
 	region_info: Optional[dict] = None                           # Structure MWG brute, conservée à l'écriture
 	person_in_image: list[str] = field(default_factory = list)
@@ -434,7 +546,14 @@ class PhotoTags:
 	raw: dict = field(default_factory = dict)                    # Entrée JSON brute d'ExifTool (mémorisée en base)
 
 	def weak_names(self, use_keywords: bool) -> list[str]:
-		"""Noms « candidats » sans position dans l'image (PersonInImage et, au choix, mots-clés)."""
+		"""Liste les noms « candidats », présents dans la photo mais sans position dans l'image.
+
+		Args:
+			use_keywords (bool): `True` pour compter aussi les mots-clés (`Subject`, `Keywords`, `XPKeywords`) comme noms.
+
+		Returns:
+			list[str]: Noms de `PersonInImage`, et des mots-clés si demandé, sans doublon.
+		"""
 		names = list(self.person_in_image)
 		if use_keywords:
 			names += self.subject + self.keywords + self.xp_keywords
@@ -442,7 +561,16 @@ class PhotoTags:
 
 
 def parse_photo_tags(entry: dict) -> PhotoTags:
-	"""Transforme l'entrée JSON d'ExifTool pour une photo en objet PhotoTags."""
+	"""Transforme l'entrée JSON d'ExifTool pour une photo en objet PhotoTags.
+
+	Les régions MWG (X et Y au centre) et Microsoft (coin supérieur gauche) sont converties dans le même repère : coin supérieur gauche, valeurs normalisées. Les régions illisibles ou qui ne sont pas des visages sont ignorées.
+
+	Args:
+		entry (dict): Entrée JSON d'ExifTool (options `-json -struct`) pour une photo ; un dictionnaire vide donne des étiquettes vides.
+
+	Returns:
+		PhotoTags: Étiquettes de la photo.
+	"""
 	tags = PhotoTags(raw = {key: value for key, value in entry.items() if key != "SourceFile"})
 
 	# Régions MWG : X/Y désignent le CENTRE du rectangle, en coordonnées normalisées
@@ -492,21 +620,43 @@ def parse_photo_tags(entry: dict) -> PhotoTags:
 
 
 class ExifTool:
-	"""Petit adaptateur autour de l'exécutable ExifTool."""
+	"""Petit adaptateur autour de l'exécutable ExifTool.
+
+	Attributes:
+		path (Optional[str]): Chemin complet de l'exécutable, ou None s'il est introuvable.
+	"""
 
 	def __init__(self, executable: str = "exiftool") -> None:
-		"""Cherche l'exécutable `executable` (nom ou chemin) ; `path` vaut None s'il est introuvable."""
+		"""Cherche l'exécutable d'ExifTool.
+
+		Args:
+			executable (str): Nom de l'exécutable (cherché dans le `PATH`) ou chemin complet.
+		"""
 		self.path: Optional[str] = shutil.which(executable)
 
 	@property
 	def available(self) -> bool:
-		"""Vrai si l'exécutable d'ExifTool a été trouvé."""
+		"""bool: True si l'exécutable d'ExifTool a été trouvé."""
 		return self.path is not None
 
-	def run(self, options: list[str], files: list[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
-		"""Lance ExifTool. Les arguments (noms de fichiers compris) passent en UTF-8 par l'entrée standard
-		(-@ -) : cela évite la limite de longueur de la ligne de commande et les soucis d'encodage des
-		noms accentués, notamment sous Windows. `cwd` fixe le dossier de travail du processus."""
+	def run(
+			self,
+			options: list[str],
+			files: list[str],
+			cwd: Optional[str] = None
+		) -> subprocess.CompletedProcess:
+		"""Lance ExifTool et attend la fin de son exécution.
+
+		Les arguments (noms de fichiers compris) passent en UTF-8 par l'entrée standard (`-@ -`) : cela évite la limite de longueur de la ligne de commande et les soucis d'encodage des noms accentués, notamment sous Windows.
+
+		Args:
+			options (list[str]): Options d'ExifTool (par exemple `["-json", "-struct"]`).
+			files (list[str]): Fichiers à traiter.
+			cwd (Optional[str]): Dossier de travail du processus, ou `None` pour garder le dossier courant.
+
+		Returns:
+			subprocess.CompletedProcess: Résultat du processus, avec sa sortie standard et sa sortie d'erreur en octets.
+		"""
 		arguments = ["-charset", "filename=utf8", *options, *files]
 		return subprocess.run(
 			[self.path, "-@", "-"],
@@ -517,9 +667,20 @@ class ExifTool:
 			creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0),
 		)
 
-	def read_tags(self, photos: list[str], progress: Optional[Callable[[int, int], None]] = None) -> dict[str, dict]:
-		"""Lit les étiquettes de plusieurs photos. Retourne {path_key(photo): entrée JSON}.
-		Les photos qu'ExifTool n'a pas pu lire sont absentes du résultat."""
+	def read_tags(
+			self,
+			photos: list[str],
+			progress: Optional[Callable[[int, int], None]] = None
+		) -> dict[str, dict]:
+		"""Lit les étiquettes (`TAGS_TO_READ`) de plusieurs photos, par lots de 100.
+
+		Args:
+			photos (list[str]): Chemins des photos.
+			progress (Optional[Callable[[int, int], None]]): Fonction appelée après chaque lot avec le nombre de photos lues et leur nombre total, ou `None`.
+
+		Returns:
+			dict[str, dict]: Entrée JSON d'ExifTool de chaque photo, par clé `path_key(photo)`. Les photos qu'ExifTool n'a pas pu lire sont absentes du résultat.
+		"""
 		result: dict[str, dict] = {}
 		for start in range(0, len(photos), 100):
 			chunk = photos[start:start + 100]
@@ -535,8 +696,17 @@ class ExifTool:
 		return result
 
 	def write_tags(self, records: list[dict], backup: bool) -> list[str]:
-		"""Écrit les métadonnées décrites par `records` (un dictionnaire par photo, avec SourceFile).
-		Retourne les messages d'ExifTool (avertissements et erreurs compris)."""
+		"""Écrit des métadonnées dans plusieurs photos en un seul appel d'ExifTool.
+
+		Les enregistrements passent par un fichier JSON placé dans un dossier temporaire, qui sert aussi de dossier de travail : son chemin, qui peut contenir des accents, n'est jamais passé en argument. La date de modification des fichiers est conservée.
+
+		Args:
+			records (list[dict]): Un dictionnaire par photo, avec la clé « `SourceFile` » (chemin de la photo) et les champs à écrire (« `XMP-iptcExt:PersonInImage` », « `XMP-mwg-rs:RegionInfo` »…).
+			backup (bool): True pour laisser ExifTool créer une sauvegarde `*_original` de chaque photo, `False` pour modifier les photos sans copie (`-overwrite_original`).
+
+		Returns:
+			list[str]: Messages d'ExifTool, ligne par ligne (bilans, avertissements et erreurs compris).
+		"""
 		# Les enregistrements sont transmis dans un fichier JSON temporaire : c'est le moyen le plus fiable
 		# d'écrire des structures XMP (régions) contenant des noms avec des caractères spéciaux.
 		# ExifTool est lancé DANS le dossier temporaire et lit le JSON par un nom relatif : le chemin du
@@ -561,16 +731,40 @@ class ExifTool:
 # ======================================================================================
 
 class FaceEngine:
-	"""Détecte les visages d'une photo et calcule l'empreinte numérique de chacun, avec DeepFace."""
+	"""Détecte les visages d'une photo et calcule l'empreinte numérique de chacun, avec DeepFace.
 
-	def __init__(self, deepface: ModuleType, model_name: str, detector_backend: str, max_image_size: int,
-				min_face_size: int, detection_score: float) -> None:
+	Attributes:
+		deepface (ModuleType): Module DeepFace renvoyé par `load_deepface`.
+		model_name (str): Modèle de reconnaissance (clé de `RECOGNITION_MODELS`).
+		detector_backend (str): Détecteur de visages (élément de `DETECTOR_BACKENDS`).
+		max_image_size (int): Plus grand côté, en pixels, de l'image analysée.
+		min_face_size (int): Plus petit côté, en pixels, d'un visage retenu.
+		detection_score (float): Confiance minimale de la détection, de `0` à `1`.
+	"""
+
+	def __init__(
+			self,
+			deepface: ModuleType,
+			model_name: str,
+			detector_backend: str,
+			max_image_size: int,
+			min_face_size: int,
+			detection_score: float
+		) -> None:
 		"""Prépare DeepFace pour l'analyse des photos.
 
-		`deepface` est le module renvoyé par load_deepface() ; `model_name` et `detector_backend` désignent le
-		modèle de reconnaissance et le détecteur. `max_image_size` (pixels) borne la taille de l'image analysée,
-		`min_face_size` (pixels) écarte les visages trop petits et `detection_score` (de 0 à 1) ceux dont la
-		détection est trop incertaine.
+		Les deux réseaux sont construits tout de suite (et leurs poids téléchargés au premier lancement) : une erreur arrête ainsi l'analyse avant la première photo, au lieu de faire échouer les photos une à une.
+
+		Args:
+			deepface (ModuleType): Module DeepFace renvoyé par `load_deepface`.
+			model_name (str): Modèle de reconnaissance (« ArcFace », « Facenet512 »…).
+			detector_backend (str): Détecteur de visages (« retinaface », « yunet »…).
+			max_image_size (int): Plus grand côté, en pixels, de l'image analysée : les photos plus grandes sont réduites.
+			min_face_size (int): Taille minimale, en pixels, d'un visage retenu : les plus petits sont écartés.
+			detection_score (float): Confiance minimale de la détection, de `0` à `1` : les visages plus incertains sont écartés.
+
+		Raises:
+			Exception: Si un modèle est inconnu ou si ses poids ne peuvent pas être téléchargés (erreur transmise par DeepFace).
 		"""
 		self.deepface: ModuleType = deepface
 		self.model_name: str = model_name
@@ -578,14 +772,24 @@ class FaceEngine:
 		self.max_image_size: int = max_image_size
 		self.min_face_size: int = min_face_size
 		self.detection_score: float = detection_score
-		# Les deux réseaux sont construits tout de suite (et leurs poids téléchargés au premier lancement) : une
-		# erreur (pas de connexion, modèle inconnu) arrête ainsi l'analyse avant la première photo, au lieu de faire
-		# échouer les photos une à une. DeepFace les garde ensuite en mémoire pour les appels suivants.
+		# Les deux réseaux sont construits tout de suite (et leurs poids téléchargés au premier lancement) : une erreur (pas de connexion, modèle inconnu) arrête ainsi l'analyse avant la première photo, au lieu de faire échouer les photos une à une. DeepFace les garde ensuite en mémoire pour les appels suivants.
 		deepface.build_model(model_name)
 		deepface.build_model(detector_backend, task = "face_detector")
 
 	def analyse(self, photo: str) -> list[dict]:
-		"""Retourne, pour chaque visage : boîte normalisée, score, empreinte (octets) et vignette JPEG (octets)."""
+		"""Détecte les visages d'une photo et calcule leur empreinte.
+
+		La photo est redressée selon son orientation EXIF, puis réduite à `max_image_size`. Les visages trop petits ou trop incertains sont écartés.
+
+		Args:
+			photo (str): Chemin de la photo.
+
+		Returns:
+			list[dict]: Un dictionnaire par visage retenu, avec les clés « `box` » (`tuple[float, float, float, float]` : x, y, largeur, hauteur normalisés sur l'image redressée), « `score` » (`float` : confiance de la détection), « `embedding` » (`bytes` : empreinte en `float32`) et « `thumbnail` » (`bytes` : vignette JPEG).
+
+		Raises:
+			OSError: Si la photo ne peut pas être ouverte ou décodée.
+		"""
 		with Image.open(photo) as source:
 			# Pour les JPEG, le décodage à échelle réduite accélère beaucoup les gros fichiers
 			source.draft("RGB", (self.max_image_size, self.max_image_size))
@@ -597,9 +801,7 @@ class FaceEngine:
 		if scale < 1:
 			image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
 
-		# DeepFace attend un tableau NumPy dans l'ordre BGR d'OpenCV (Pillow fournit du RGB). Lui passer l'image
-		# déjà décodée, plutôt que son chemin, évite aussi la lecture par OpenCV, qui échoue sur les chemins
-		# accentués sous Windows et ignore l'orientation EXIF.
+		# DeepFace attend un tableau NumPy dans l'ordre BGR d'OpenCV (Pillow fournit du RGB). Lui passer l'image déjà décodée, plutôt que son chemin, évite aussi la lecture par OpenCV, qui échoue sur les chemins accentués sous Windows et ignore l'orientation EXIF.
 		bgr = np.ascontiguousarray(np.asarray(image)[:, :, ::-1])
 		height, width = bgr.shape[:2]
 		detections = self.deepface.represent(
@@ -612,7 +814,7 @@ class FaceEngine:
 
 		results: list[dict] = []
 		for detection in detections:
-			# Faute de visage, DeepFace renvoie l'image entière avec une confiance nulle : elle est écartée ici
+			# Faute de visage, DeepFace renvoie l'image entière avec une confiance nulle : elle est écartée ici
 			confidence = float(detection.get("face_confidence") or 0)
 			if confidence <= 0 or confidence < self.detection_score:
 				continue
@@ -625,7 +827,7 @@ class FaceEngine:
 			x0, y0 = max(0.0, x), max(0.0, y)
 			x1, y1 = min(float(width), x + w), min(float(height), y + h)
 			if min(x1 - x0, y1 - y0) < self.min_face_size:
-				continue  # Visage trop petit : l'empreinte serait peu fiable
+				continue  # Visage trop petit : l'empreinte serait peu fiable
 			# Empreinte de 128 à 4096 dimensions selon le modèle, stockée en flottants de 32 bits
 			embedding = np.asarray(detection["embedding"], dtype = np.float32)
 			results.append({
@@ -643,7 +845,18 @@ class FaceEngine:
 
 @dataclass(eq = False)
 class FaceRecord:
-	"""Un visage détecté dans une photo."""
+	"""Un visage détecté dans une photo.
+
+	Attributes:
+		photo (str): Chemin absolu de la photo.
+		box (tuple[float, float, float, float]): x, y, largeur et hauteur du visage, normalisés sur l'image redressée.
+		score (float): Confiance de la détection, de `0` à `1`.
+		embedding (np.ndarray): Empreinte numérique du visage (`float32`, de `128` à `4096` dimensions selon le modèle).
+		face_id (int): Identifiant du visage dans la base SQLite, où sa vignette est lue à la demande.
+		label (Optional[str]): Nom issu d'une région déjà étiquetée dans la photo, ou `None`.
+		person (Optional[Person]): Personne à laquelle le visage est rattaché, ou `None`.
+		deleted (bool): `True` si l'utilisateur l'a écarté (faux positif).
+	"""
 	photo: str
 	box: tuple[float, float, float, float]       # x, y, largeur, hauteur normalisés (image redressée)
 	score: float
@@ -656,7 +869,15 @@ class FaceRecord:
 
 @dataclass(eq = False)
 class Person:
-	"""Un groupe de visages censés appartenir à la même personne."""
+	"""Un groupe de visages censés appartenir à la même personne.
+
+	Attributes:
+		identifier (int): Identifiant unique dans la photothèque, repris dans la liste des personnes.
+		faces (list[FaceRecord]): Visages de la personne.
+		name (Optional[str]): Nom de la personne, ou `None` tant qu'elle est inconnue.
+		source (str): Origine du nom : « `tag` » (étiquette existante), « `manual` » (saisi) ou vide.
+		ignored (bool): `True` si la personne est exclue de l'écriture des métadonnées.
+	"""
 	identifier: int
 	faces: list[FaceRecord] = field(default_factory = list)
 	name: Optional[str] = None
@@ -665,23 +886,31 @@ class Person:
 
 	@property
 	def photos(self) -> set[str]:
-		"""Photos (chemins) où apparaît la personne, sans doublon."""
+		"""set[str]: Chemins des photos où apparaît la personne, sans doublon."""
 		return {face.photo for face in self.faces}
 
 	@property
 	def display_name(self) -> str:
-		"""Nom affiché : celui de la personne, ou « Inconnu n°… » tant qu'elle n'en a pas."""
+		"""str: Nom affiché : celui de la personne, ou « Inconnu n°… » tant qu'elle n'en a pas."""
 		return self.name or f"Inconnu n°{self.identifier}"
 
 
 def cluster_faces(embeddings: np.ndarray, label_keys: list[Optional[str]], scores: list[float],
 				threshold: float) -> list[list[int]]:
-	"""Regroupe des empreintes de visages. Retourne une liste de groupes (listes d'indices).
+	"""Regroupe des empreintes de visages par personne.
 
 	- Les visages déjà étiquetés sont d'abord regroupés par nom : l'étiquette fait foi.
-	- Les autres rejoignent le groupe le plus proche si la similarité cosinus atteint le seuil,
-		sinon ils fondent un nouveau groupe.
+	- Les autres rejoignent le groupe le plus proche si la similarité cosinus atteint le seuil, sinon ils fondent un nouveau groupe.
 	- Les groupes devenus trop proches sont fusionnés, sauf s'ils portent des noms différents.
+
+	Args:
+		embeddings (np.ndarray): Empreintes, une ligne par visage (tableau de forme (nombre, dimension)).
+		label_keys (list[Optional[str]]): Clé du nom (voir `name_key`) de chaque visage déjà étiqueté, None sinon.
+		scores (list[float]): Confiance de la détection de chaque visage : les plus nets sont placés en premier.
+		threshold (float): Similarité cosinus minimale pour rattacher un visage à un groupe ou fusionner deux groupes.
+
+	Returns:
+		list[list[int]]: Groupes, chacun donné par les indices de ses visages dans `embeddings`.
 	"""
 	count = len(embeddings)
 	if count == 0:
@@ -697,7 +926,14 @@ def cluster_faces(embeddings: np.ndarray, label_keys: list[Optional[str]], score
 	centroids = np.zeros((count, dimension), dtype = np.float32)
 
 	def new_cluster(label: Optional[str]) -> int:
-		"""Crée un groupe vide, portant l'étiquette `label` (ou aucune), et retourne son rang."""
+		"""Crée un groupe vide.
+
+		Args:
+			label (Optional[str]): Clé du nom porté par le groupe, ou `None` pour un groupe sans nom.
+
+		Returns:
+			int: Rang du nouveau groupe.
+		"""
 		members.append([])
 		sums.append(np.zeros(dimension, dtype = np.float32))
 		cluster_labels.append(label)
@@ -756,10 +992,17 @@ def cluster_faces(embeddings: np.ndarray, label_keys: list[Optional[str]], score
 
 
 class Library:
-	"""Ensemble des visages, des personnes et des étiquettes existantes."""
+	"""Ensemble des visages, des personnes et des étiquettes existantes.
+
+	Attributes:
+		faces (list[FaceRecord]): Tous les visages détectés, y compris ceux écartés.
+		persons (dict[int, Person]): Personnes, par identifiant.
+		photo_tags (dict[str, PhotoTags]): Étiquettes déjà présentes dans chaque photo, par chemin.
+		_next_id (int): Prochain identifiant de personne à attribuer.
+	"""
 
 	def __init__(self) -> None:
-		"""Crée une photothèque vide, remplie ensuite par l'analyse (scan_worker)."""
+		"""Crée une photothèque vide, remplie ensuite par l'analyse (`scan_worker`)."""
 		self.faces: list[FaceRecord] = []
 		self.persons: dict[int, Person] = {}
 		self.photo_tags: dict[str, PhotoTags] = {}     # Étiquettes existantes, par photo
@@ -769,7 +1012,12 @@ class Library:
 
 	def label_faces(self) -> int:
 		"""Associe aux visages détectés les noms des régions déjà présentes dans les photos.
-		Retourne le nombre de régions nommées auxquelles aucun visage ne correspond."""
+
+		L'appariement est glouton, par recouvrement décroissant : un visage reçoit au plus une région, et une région au plus un visage, à condition que leur IoU atteigne `REGION_MATCH_IOU`.
+
+		Returns:
+			int: Nombre de régions nommées auxquelles aucun visage détecté ne correspond.
+		"""
 		by_photo: dict[str, list[FaceRecord]] = {}
 		for face in self.faces:
 			by_photo.setdefault(face.photo, []).append(face)
@@ -800,7 +1048,14 @@ class Library:
 	# ---------- Regroupement ----------
 
 	def rebuild(self, threshold: float, use_keywords: bool) -> None:
-		"""Regroupe les visages en personnes puis les nomme d'après les étiquettes existantes."""
+		"""Regroupe les visages en personnes, puis les nomme d'après les étiquettes existantes.
+
+		Les personnes précédentes sont remplacées : les noms saisis et les fusions manuelles sont perdus. Les visages écartés ne sont pas regroupés.
+
+		Args:
+			threshold (float): Seuil de similarité cosinus (voir `cluster_faces`).
+			use_keywords (bool): True pour accepter aussi les mots-clés comme noms de personnes.
+		"""
 		self.persons.clear()
 		self._next_id = 1
 		active = [face for face in self.faces if not face.deleted]
@@ -823,8 +1078,11 @@ class Library:
 	def _name_from_weak_tags(self, use_keywords: bool) -> None:
 		"""Nomme les groupes restants à partir des noms sans position (PersonInImage, mots-clés).
 
-		Un nom est attribué à un groupe s'il figure dans au moins 60 % de ses photos et s'il
-		domine nettement les autres candidats. Un même nom n'est donné qu'à un seul groupe."""
+		Un nom est attribué à un groupe s'il figure dans au moins 60 % de ses photos et s'il domine nettement les autres candidats. Un même nom n'est donné qu'à un seul groupe.
+
+		Args:
+			use_keywords (bool): True pour compter aussi les mots-clés comme noms candidats.
+		"""
 		by_photo: dict[str, list[FaceRecord]] = {}
 		for face in self.faces:
 			by_photo.setdefault(face.photo, []).append(face)
@@ -866,7 +1124,12 @@ class Library:
 	def new_person(self, name: Optional[str] = None, source: str = "") -> Person:
 		"""Crée une personne, avec un identifiant jamais encore utilisé, et l'ajoute à la photothèque.
 
-		`name` et `source` (« tag » ou « manual ») sont son nom éventuel et l'origine de ce nom.
+		Args:
+			name (Optional[str]): Nom de la personne, ou `None` pour une personne inconnue.
+			source (str): Origine du nom : « tag », « manual » ou vide.
+
+		Returns:
+			Person: Nouvelle personne, encore sans visage.
 		"""
 		person = Person(identifier = self._next_id, name = name, source = source)
 		self.persons[person.identifier] = person
@@ -874,7 +1137,14 @@ class Library:
 		return person
 
 	def person_by_name(self, name: str) -> Optional[Person]:
-		"""Retourne la personne qui porte ce nom (sans tenir compte de la casse ni des espaces), ou None."""
+		"""Cherche la personne qui porte un nom, sans tenir compte de la casse ni des espaces superflus.
+
+		Args:
+			name (str): Nom cherché.
+
+		Returns:
+			Optional[Person]: Personne trouvée, ou `None`.
+		"""
 		key = name_key(name)
 		for person in self.persons.values():
 			if person.name and name_key(person.name) == key:
@@ -882,7 +1152,15 @@ class Library:
 		return None
 
 	def rename(self, person: Person, name: str) -> Person:
-		"""Nomme une personne. Si ce nom existe déjà, les deux groupes sont fusionnés."""
+		"""Nomme une personne ; si ce nom est déjà porté par une autre, les deux groupes sont fusionnés.
+
+		Args:
+			person (Person): Personne à nommer.
+			name (str): Nouveau nom (les espaces superflus sont retirés).
+
+		Returns:
+			Person: Personne qui porte désormais le nom : `person` elle-même, ou celle qui le portait déjà et dans laquelle `person` a été fusionnée.
+		"""
 		name = normalize_name(name)
 		existing = self.person_by_name(name)
 		if existing is not None and existing is not person:
@@ -891,7 +1169,17 @@ class Library:
 		return person
 
 	def merge(self, persons: list[Person], keep: Optional[Person] = None) -> Person:
-		"""Fusionne plusieurs personnes. On garde en priorité une personne nommée, puis la plus grosse."""
+		"""Fusionne plusieurs personnes en une seule.
+
+		Les personnes absorbées sont vidées de leurs visages et retirées de la photothèque.
+
+		Args:
+			persons (list[Person]): Personnes à fusionner.
+			keep (Optional[Person]): Personne à conserver ; None pour choisir en priorité une personne nommée, puis celle qui a le plus de visages.
+
+		Returns:
+			Person: Personne conservée, qui réunit tous les visages.
+		"""
 		if keep is None:
 			keep = max(persons, key = lambda p: (p.name is not None, len(p.faces)))
 		for other in persons:
@@ -905,7 +1193,14 @@ class Library:
 		return keep
 
 	def move_face(self, face: FaceRecord, target: Person) -> None:
-		"""Déplace un visage vers une autre personne."""
+		"""Déplace un visage vers une autre personne.
+
+		Une personne qui n'a plus de visage est retirée de la photothèque.
+
+		Args:
+			face (FaceRecord): Visage à déplacer.
+			target (Person): Personne de destination.
+		"""
 		source = face.person
 		if source is target:
 			return
@@ -917,7 +1212,13 @@ class Library:
 		target.faces.append(face)
 
 	def delete_face(self, face: FaceRecord) -> None:
-		"""Écarte un visage (faux positif)."""
+		"""Écarte un visage (faux positif) : il n'est plus affiché ni écrit dans les métadonnées.
+
+		Une personne qui n'a plus de visage est retirée de la photothèque.
+
+		Args:
+			face (FaceRecord): Visage à écarter.
+		"""
 		face.deleted = True
 		source = face.person
 		if source is not None:
@@ -927,7 +1228,14 @@ class Library:
 		face.person = None
 
 	def faces_of_photo(self, photo: str) -> list[FaceRecord]:
-		"""Visages d'une photo, sauf ceux écartés par l'utilisateur."""
+		"""Liste les visages d'une photo, sauf ceux écartés par l'utilisateur.
+
+		Args:
+			photo (str): Chemin de la photo.
+
+		Returns:
+			list[FaceRecord]: Visages de la photo.
+		"""
 		return [face for face in self.faces if face.photo == photo and not face.deleted]
 
 
@@ -935,13 +1243,21 @@ class Library:
 # Construction des métadonnées à écrire
 # ======================================================================================
 
-def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> tuple[dict, dict[str, str]]:
-	"""Construit la structure XMP-mwg-rs:RegionInfo en conservant les régions déjà présentes.
+def build_region_info(
+		tags: PhotoTags,
+		items: list[tuple[str, FaceRecord]]
+	) -> tuple[dict, dict[str, str]]:
+	"""Construit la structure `XMP-mwg-rs:RegionInfo` en conservant les régions déjà présentes.
 
-	Pour chaque visage nommé : si une région existante le recouvre, on la complète (nom manquant) ;
-	si elle porte un autre nom, le choix actuel de l'utilisateur la remplace (personne renommée ou
-	fusionnée) ; sinon on ajoute une nouvelle région « Face ».
-	Retourne la structure et les noms remplacés {ancien nom: nouveau nom}."""
+	Pour chaque visage nommé : si une région existante le recouvre, on la complète (nom manquant) ; si elle porte un autre nom, le choix actuel de l'utilisateur la remplace (personne renommée ou fusionnée) ; sinon on ajoute une nouvelle région « `Face` ».
+
+	Args:
+		tags (PhotoTags): Étiquettes actuelles de la photo.
+		items (list[tuple[str, FaceRecord]]): Couples (nom à écrire, visage) de la photo.
+
+	Returns:
+		tuple[dict, dict[str, str]]: Structure `RegionInfo` à écrire (régions MWG : X et Y au centre, valeurs normalisées) et noms remplacés {ancien nom: nouveau nom}.
+	"""
 	existing = tags.region_info or {}
 	region_list = [dict(region) for region in (existing.get("RegionList") or []) if isinstance(region, dict)]
 	info = {
@@ -950,8 +1266,13 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> t
 	}
 
 	def region_box(region: dict) -> Optional[tuple]:
-		"""Rectangle (x, y, largeur, hauteur) d'une région MWG, dont X et Y désignent le centre ;
-		None si sa zone est illisible.
+		"""Convertit la zone d'une région MWG, dont X et Y désignent le centre, en rectangle.
+
+		Args:
+			region (dict): Région MWG, avec sa clé « Area » (X, Y, W, H).
+
+		Returns:
+			Optional[tuple]: Rectangle (x, y, largeur, hauteur), (x, y) étant le coin supérieur gauche ; `None` si la zone est absente ou illisible.
 		"""
 		area = region.get("Area") or {}
 		try:
@@ -992,7 +1313,20 @@ def build_region_info(tags: PhotoTags, items: list[tuple[str, FaceRecord]]) -> t
 
 
 def check_written(tags: PhotoTags, names: list[str], regions: bool, person: bool, keywords: bool) -> bool:
-	"""Vérifie, d'après les étiquettes relues, que les noms demandés figurent bien dans la photo."""
+	"""Vérifie, d'après les étiquettes relues, que les noms demandés figurent bien dans la photo.
+
+	Seuls les champs demandés sont contrôlés ; pour les mots-clés, seul `XMP-dc:Subject` l'est.
+
+	Args:
+		tags (PhotoTags): Étiquettes relues dans la photo.
+		names (list[str]): Noms qui doivent y figurer.
+		regions (bool): `True` pour contrôler les régions de visages.
+		person (bool): `True` pour contrôler `XMP-iptcExt:PersonInImage`.
+		keywords (bool): `True` pour contrôler les mots-clés `XMP-dc:Subject`.
+
+	Returns:
+		bool: `True` si chaque champ contrôlé contient tous les noms (et donc toujours `True` si aucun ne l'est).
+	"""
 	wanted = {name_key(name) for name in names}
 	present: list[set[str]] = []
 	if person:
@@ -1004,12 +1338,26 @@ def check_written(tags: PhotoTags, names: list[str], regions: bool, person: bool
 	return all(wanted <= found for found in present)
 
 
-def photos_missing_name(library: "Library", person: Person, regions: bool, person_in_image: bool,
-						keywords: bool) -> list[str]:
-	"""Photos de la personne où son nom manque encore, d'après les étiquettes connues et les champs à écrire.
+def photos_missing_name(
+		library: "Library",
+		person: Person,
+		regions: bool,
+		person_in_image: bool,
+		keywords: bool
+	) -> list[str]:
+	"""Liste les photos de la personne où son nom manque encore, d'après les étiquettes connues et les champs à écrire.
 
-	Sert à la fois à la colonne « Métadonnées » de la liste et à la validation : seules ces photos sont
-	modifiées, les autres (déjà à jour) ne sont pas réécrites inutilement.
+	Sert à la fois à la colonne « Métadonnées » de la liste et à la validation : seules ces photos sont modifiées, les autres (déjà à jour) ne sont pas réécrites inutilement.
+
+	Args:
+		library (Library): Photothèque, qui fournit les étiquettes connues de chaque photo.
+		person (Person): Personne concernée.
+		regions (bool): `True` si les régions de visages doivent être écrites.
+		person_in_image (bool): `True` si `XMP-iptcExt:PersonInImage` doit être écrit.
+		keywords (bool): `True` si les mots-clés doivent être écrits.
+
+	Returns:
+		list[str]: Chemins triés des photos à écrire ; liste vide si la personne n'a pas de nom.
 	"""
 	if not person.name:
 		return []
@@ -1024,22 +1372,42 @@ def photos_missing_name(library: "Library", person: Person, regions: bool, perso
 # ======================================================================================
 
 def screen_scale(window: tk.Misc) -> float:
-	"""Facteur d'agrandissement de l'écran : 1.0 à 96 ppp (100 %), 1.25 à 120 ppp (125 %), 2.0 à 200 %…
+	"""Mesure le facteur d'agrandissement de l'écran : 1.0 à 96 ppp (100 %), 1.25 à 120 ppp (125 %), 2.0 à 200 %…
 
-	Jamais inférieur à 1 : macOS annonce 72 ppp (la haute résolution Retina y est gérée par le système), ce qui
-	rapetisserait l'interface au lieu de l'adapter.
+	Jamais inférieur à 1 : macOS annonce 72 ppp (la haute résolution Retina y est gérée par le système), ce qui rapetisserait l'interface au lieu de l'adapter.
+
+	Args:
+		window (tk.Misc): Fenêtre (ou widget) dont on mesure l'écran.
+
+	Returns:
+		float: Facteur d'agrandissement, arrondi au centième et au moins égal à `1.0`.
 	"""
 	return max(1.0, round(window.winfo_fpixels("1i") / 96, 2))
 
 
 def scaled(pixels: int) -> int:
-	"""Convertit une taille prévue pour un écran à 100 % en pixels réels, selon l'échelle de l'écran."""
+	"""Convertit une taille prévue pour un écran à 100 % en pixels réels, selon l'échelle de l'écran.
+
+	Args:
+		pixels (int): Taille, en pixels, pour un écran à 100 % (96 ppp).
+
+	Returns:
+		int: Taille agrandie selon `SETTINGS["scale"]`, arrondie au pixel.
+	"""
 	return round(pixels * SETTINGS["scale"])
 
 
 def work_area(window: tk.Misc) -> tuple[int, int, int, int]:
-	"""Zone utile de l'écran principal, barre des tâches exclue : (gauche, haut, largeur, hauteur) en pixels.
-	Ailleurs que sous Windows, l'écran entier (le gestionnaire de fenêtres y replace lui-même les fenêtres)."""
+	"""Donne la zone utile de l'écran principal, barre des tâches exclue.
+
+	Ailleurs que sous Windows, c'est l'écran entier : le gestionnaire de fenêtres y replace lui-même les fenêtres.
+
+	Args:
+		window (tk.Misc): Fenêtre (ou widget) qui sert à mesurer l'écran hors de Windows.
+
+	Returns:
+		tuple[int, int, int, int]: (gauche, haut, largeur, hauteur) de la zone, en pixels.
+	"""
 	if sys.platform == "win32":
 		rect = (ctypes.c_long * 4)()        # Structure RECT : gauche, haut, droite, bas
 		try:
@@ -1050,11 +1418,20 @@ def work_area(window: tk.Misc) -> tuple[int, int, int, int]:
 	return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
 
 
-def thumbnail_photo(data: Optional[bytes], size: int = THUMBNAIL_SIZE) -> ImageTk.PhotoImage:
-	"""Image Tk d'une vignette de la base, à la taille voulue agrandie selon l'échelle de l'écran.
+def thumbnail_photo(
+		data: Optional[bytes],
+		size: int = THUMBNAIL_SIZE
+	) -> ImageTk.PhotoImage:
+	"""Crée l'image `Tk` d'une vignette de la base, à la taille voulue agrandie selon l'échelle de l'écran.
 
-	Les vignettes restent stockées en 96 pixels : les régénérer plus grandes obligerait à ré-analyser toute la
-	photothèque, pour un gain de netteté minime.
+	Les vignettes restent stockées en 96 pixels : les régénérer plus grandes obligerait à ré-analyser toute la photothèque, pour un gain de netteté minime.
+
+	Args:
+		data (Optional[bytes]): Vignette JPEG lue dans la base, ou `None` (un carré gris la remplace).
+		size (int): Côté voulu, en pixels, pour un écran à 100 %.
+
+	Returns:
+		ImageTk.PhotoImage: Image prête pour un widget `Tk` ; il faut en garder une référence, sinon elle disparaît.
 	"""
 	image = decode_thumbnail(data)
 	display_size = scaled(size)
@@ -1064,10 +1441,12 @@ def thumbnail_photo(data: Optional[bytes], size: int = THUMBNAIL_SIZE) -> ImageT
 
 
 def set_title_bar_theme(window: tk.Misc) -> None:
-	"""Assombrit la barre de titre d'une fenêtre en mode sombre (Windows 10 version 2004 et suivantes, Windows 11).
+	"""Assombrit la barre de titre d'une fenêtre en mode sombre (Windows 10 version 2004 et suivantes, Windows 11).
 
-	La barre de titre est dessinée par Windows et non par Tk : c'est l'attribut DWM « mode sombre immersif » de la
-	fenêtre qui la passe en sombre. La fenêtre doit déjà exister côté Windows, d'où update_idletasks().
+	La barre de titre est dessinée par Windows et non par `Tk` : c'est l'attribut DWM « mode sombre immersif » de la fenêtre qui la passe en sombre. La fenêtre doit déjà exister côté Windows, d'où `update_idletasks()`. Sans effet hors de Windows ou en thème clair.
+
+	Args:
+		window (tk.Misc): Fenêtre principale ou boîte de dialogue à assombrir.
 	"""
 	if sys.platform != "win32" or not SETTINGS["dark"]:
 		return
@@ -1087,10 +1466,10 @@ def set_title_bar_theme(window: tk.Misc) -> None:
 def apply_dark_theme(root: tk.Tk) -> None:
 	"""Applique le thème sombre à toute l'application.
 
-	Les thèmes ttk natifs de Windows (« vista », « winnative ») dessinent les widgets avec les styles visuels du
-	système, toujours clairs : leurs couleurs ne se règlent pas. Le thème « clam », dessiné par Tk lui-même, accepte
-	toutes les couleurs. Les widgets Tk classiques (canevas, texte, menus, fenêtres de dialogue) prennent les leurs
-	dans la base d'options, qui ne vaut que pour les widgets créés ensuite : à appeler avant de construire l'interface.
+	Les thèmes `ttk` natifs de Windows (« vista », « winnative ») dessinent les widgets avec les styles visuels du système, toujours clairs : leurs couleurs ne se règlent pas. Le thème « clam », dessiné par `Tk` lui-même, accepte toutes les couleurs. Les widgets `Tk` classiques (canevas, texte, menus, fenêtres de dialogue) prennent les leurs dans la base d'options, qui ne vaut que pour les widgets créés ensuite : à appeler avant de construire l'interface.
+
+	Args:
+		root (tk.Tk): Fenêtre principale de l'application.
 	"""
 	colors = DARK_COLORS
 	style = ttk.Style(root)
@@ -1117,8 +1496,7 @@ def apply_dark_theme(root: tk.Tk) -> None:
 		background = [("disabled", colors["background"])],
 		foreground = [("disabled", colors["disabled"])],
 	)
-	# Éléments cliquables : plus clairs au survol, plus encore à l'appui. Les teintes du thème « clam » pour ces
-	# états sont claires et doivent toutes être remplacées.
+	# Éléments cliquables : plus clairs au survol, plus encore à l'appui. Les teintes du thème « clam » pour ces états sont claires et doivent toutes être remplacées.
 	for name, normal, hover, pressed in (
 		("TButton", colors["button"], colors["hover"], colors["pressed"]),
 		("Treeview.Heading", colors["button"], colors["hover"], colors["pressed"]),
@@ -1208,17 +1586,28 @@ def apply_dark_theme(root: tk.Tk) -> None:
 class ToolTip:
 	"""Infobulle : courte aide affichée quand la souris s'arrête sur un widget.
 
-	Tkinter n'en propose pas. Le texte est fixe, ou calculé d'après la position de la souris par une fonction qui
-	reçoit l'événement et renvoie le texte (None : pas d'infobulle) ; la liste des personnes s'en sert pour décrire
-	la colonne ou la ligne survolée. Comme sous Windows, l'infobulle n'apparaît qu'une fois la souris immobile, et
-	un clic la masque jusqu'à ce que la souris quitte l'élément (ou passe sur une autre ligne).
+	Tkinter n'en propose pas. Le texte est fixe, ou calculé d'après la position de la souris par une fonction qui reçoit l'événement et renvoie le texte (`None` : pas d'infobulle) ; la liste des personnes s'en sert pour décrire la colonne ou la ligne survolée. Comme sous Windows, l'infobulle n'apparaît qu'une fois la souris immobile, et un clic la masque jusqu'à ce que la souris quitte l'élément (ou passe sur une autre ligne).
+
+	Attributes:
+		widget (tk.Misc): Widget auquel l'infobulle est attachée.
+		text (str | Callable[[tk.Event], Optional[str]]): Texte fixe, ou fonction qui le calcule d'après l'événement.
+		window (Optional[tk.Toplevel]): Fenêtre de l'infobulle affichée, ou `None`.
+		timer (Optional[str]): Minuteur d'apparition (identifiant renvoyé par `after`), ou `None`.
+		current (Optional[str]): Texte affiché, ou en attente d'affichage.
+		silenced (Optional[str]): Texte masqué par un clic, jusqu'à ce que la souris quitte l'élément.
+		position (tuple[int, int]): Position de la souris à l'écran, en pixels, lors du dernier mouvement.
 	"""
 
-	def __init__(self, widget: tk.Misc, text: str | Callable[[tk.Event], Optional[str]]) -> None:
-		"""Attache l'infobulle au widget.
+	def __init__(
+			self,
+			widget: tk.Misc,
+			text: str | Callable[[tk.Event], Optional[str]]
+		) -> None:
+		"""Attache l'infobulle à un widget, sans remplacer ses autres liaisons d'événements.
 
-		`text` est le texte fixe, ou une fonction qui reçoit l'événement de la souris et renvoie le texte
-		(None : pas d'infobulle à cet endroit).
+		Args:
+			widget (tk.Misc): Widget à décrire.
+			text (str | Callable[[tk.Event], Optional[str]]): Texte fixe, ou fonction qui reçoit l'événement de la souris et renvoie le texte (`None` : pas d'infobulle à cet endroit).
 		"""
 		self.widget: tk.Misc = widget
 		self.text: str | Callable[[tk.Event], Optional[str]] = text
@@ -1243,11 +1632,22 @@ class ToolTip:
 		widget.bind("<Destroy>", self.hide, add = "+")
 
 	def text_at(self, event: tk.Event) -> Optional[str]:
-		"""Texte de l'infobulle à l'endroit survolé."""
+		"""Calcule le texte de l'infobulle à l'endroit survolé.
+
+		Args:
+			event (tk.Event): Événement de la souris.
+
+		Returns:
+			Optional[str]: Texte à afficher, ou None (ou vide) s'il n'y a pas d'infobulle à cet endroit.
+		"""
 		return self.text(event) if callable(self.text) else self.text
 
 	def on_motion(self, event: tk.Event) -> None:
-		"""Relance le minuteur à chaque mouvement : l'infobulle n'apparaît qu'une fois la souris immobile."""
+		"""Relance le minuteur à chaque mouvement : l'infobulle n'apparaît qu'une fois la souris immobile.
+
+		Args:
+			event (tk.Event): Événement `<Enter>` ou `<Motion>`.
+		"""
 		text = self.text_at(event)
 		if text is not None and text == self.silenced:
 			return              # Clic récent sur cet élément : pas d'infobulle avant la sortie de la souris
@@ -1261,17 +1661,29 @@ class ToolTip:
 			self.timer = self.widget.after(TOOLTIP_DELAY, self.show)
 
 	def on_leave(self, event: tk.Event) -> None:
-		"""La souris quitte le widget : l'infobulle se ferme et pourra réapparaître au retour."""
+		"""Ferme l'infobulle quand la souris quitte le widget ; elle pourra réapparaître au retour.
+
+		Args:
+			event (tk.Event): Événement `<Leave>` (inutilisé).
+		"""
 		self.silenced = None
 		self.hide()
 
 	def on_press(self, event: tk.Event) -> None:
-		"""Un clic masque l'infobulle jusqu'à ce que la souris quitte l'élément cliqué."""
+		"""Masque l'infobulle après un clic, jusqu'à ce que la souris quitte l'élément cliqué.
+
+		Args:
+			event (tk.Event): Événement du clic.
+		"""
 		self.silenced = self.text_at(event)
 		self.hide()
 
 	def hide(self, event: Optional[tk.Event] = None) -> None:
-		"""Annule l'apparition prévue et ferme l'infobulle affichée."""
+		"""Annule l'apparition prévue et ferme l'infobulle affichée.
+
+		Args:
+			event (Optional[tk.Event]): Événement déclencheur (molette, touche, destruction du widget), inutilisé ; `None` lors d'un appel direct.
+		"""
 		if self.timer is not None:
 			self.widget.after_cancel(self.timer)
 			self.timer = None
@@ -1330,19 +1742,36 @@ class ToolTip:
 
 
 def photo_caption(photo: str) -> str:
-	"""Nom et dossier d'une photo, pour l'infobulle d'une vignette (le libellé de la vignette est tronqué)."""
+	"""Décrit une photo pour l'infobulle d'une vignette, dont le libellé est tronqué.
+
+	Args:
+		photo (str): Chemin de la photo.
+
+	Returns:
+		str: Nom du fichier puis dossier, sur deux lignes précédées chacune d'un emoji.
+	"""
 	return f"🖼️ {os.path.basename(photo)}\n📁 {os.path.dirname(photo)}"
 
 
 class NameDialog(tk.Toplevel):
-	"""Boîte de saisie d'un nom, avec liste déroulante des noms déjà connus."""
+	"""Boîte de saisie d'un nom, avec liste déroulante des noms déjà connus.
+
+	Attributes:
+		result (Optional[str]): Nom saisi et validé, ou `None` si la saisie a été annulée.
+		choices (list[str]): Noms proposés dans la liste déroulante.
+		variable (tk.StringVar): Texte du champ de saisie.
+		combobox (ttk.Combobox): Champ de saisie avec sa liste déroulante.
+	"""
 
 	def __init__(self, master: tk.Misc, title: str, prompt: str, choices: list[str], initial: str = "") -> None:
-		"""Ouvre la boîte (modale) et attend sa fermeture : le nom saisi est alors dans `result`
-		(None si la saisie a été annulée).
+		"""Ouvre la boîte (modale) et attend sa fermeture : le nom saisi est alors dans `result`.
 
-		`title` et `prompt` sont le titre et la question, `choices` les noms proposés dans la liste,
-		`initial` le texte de départ.
+		Args:
+			master (tk.Misc): Fenêtre parente.
+			title (str): Titre de la boîte.
+			prompt (str): Question affichée au-dessus du champ.
+			choices (list[str]): Noms proposés dans la liste déroulante.
+			initial (str): Texte de départ du champ.
 		"""
 		super().__init__(master)
 		self.title(emoji(title))
@@ -1375,7 +1804,11 @@ class NameDialog(tk.Toplevel):
 		self.wait_window(self)
 
 	def filter_choices(self, event: tk.Event) -> None:
-		"""Restreint la liste déroulante aux noms qui contiennent le texte tapé."""
+		"""Restreint la liste déroulante aux noms qui contiennent le texte tapé, sans tenir compte de la casse.
+
+		Args:
+			event (tk.Event): Événement `<KeyRelease>` du champ (inutilisé).
+		"""
 		typed = self.variable.get().casefold()
 		self.combobox.configure(values = [c for c in self.choices if typed in c.casefold()])
 
@@ -1390,11 +1823,26 @@ class NameDialog(tk.Toplevel):
 
 
 class PhotoViewer(tk.Toplevel):
-	"""Affiche une photo entière avec le cadre et le nom de chaque visage."""
+	"""Fenêtre qui affiche une photo entière, avec le cadre et le nom de chaque visage.
 
-	def __init__(self, master: tk.Misc, library: Library, face: FaceRecord) -> None:
-		"""Ouvre la photo du visage `face`, avec le cadre et le nom de chaque visage connu de `library`
-		(rouge pour le visage choisi, vert pour les autres).
+	Attributes:
+		photo_image (ImageTk.PhotoImage): Photo annotée affichée (référence conservée pour qu'elle reste visible).
+	"""
+
+	def __init__(
+			self,
+			master: tk.Misc,
+			library: Library,
+			face: FaceRecord
+		) -> None:
+		"""Ouvre la photo d'un visage, annotée du cadre et du nom de chaque visage qu'elle contient.
+
+		La photo est réduite pour tenir dans la zone utile de l'écran. Si elle ne peut pas être ouverte, un message d'erreur s'affiche et la fenêtre se referme aussitôt.
+
+		Args:
+			master (tk.Misc): Fenêtre parente.
+			library (Library): Photothèque, qui fournit les visages de la photo et le nom de leur personne.
+			face (FaceRecord): Visage dont on ouvre la photo, encadré en rouge (les autres le sont en vert).
 		"""
 		super().__init__(master)
 		self.title(emoji(f"🖼️ {face.photo}"))
@@ -1429,10 +1877,28 @@ class PhotoViewer(tk.Toplevel):
 
 
 class UnknownNamesDialog(tk.Toplevel):
-	"""Parcourt les personnes non nommées, une par une, et propose de saisir leur nom."""
+	"""Parcourt les personnes non nommées, une par une, et propose de saisir leur nom.
+
+	Attributes:
+		app (FaceTaggerApp): Fenêtre principale, qui fournit la photothèque et la base.
+		pending (list[Person]): Personnes à nommer, les plus fréquentes d'abord.
+		index (int): Rang de la personne affichée dans `pending`.
+		person (Optional[Person]): Personne affichée, ou None avant la première.
+		images (list[ImageTk.PhotoImage]): Vignettes affichées (références conservées).
+		header (ttk.Label): En-tête : rang de la personne, nombre de ses visages et de ses photos.
+		gallery (ttk.Frame): Cadre des vignettes de la personne.
+		variable (tk.StringVar): Texte du champ de saisie.
+		combobox (ttk.Combobox): Champ de saisie du nom, avec la liste des noms déjà donnés.
+	"""
 
 	def __init__(self, app: "FaceTaggerApp") -> None:
-		"""Prépare la liste des personnes sans nom de `app` (les plus fréquentes d'abord) et affiche la première."""
+		"""Prépare la liste des personnes sans nom, les plus fréquentes d'abord, puis affiche la première.
+
+		Les personnes ignorées ne sont pas proposées.
+
+		Args:
+			app (FaceTaggerApp): Fenêtre principale de l'application.
+		"""
 		super().__init__(app)
 		self.app: FaceTaggerApp = app
 		self.title(emoji("✍️ Nommer les personnes non reconnues"))
@@ -1494,12 +1960,20 @@ class UnknownNamesDialog(tk.Toplevel):
 		self.show_current()
 
 	def known_names(self) -> list[str]:
-		"""Noms déjà donnés, triés sans tenir compte de la casse, pour la liste déroulante."""
+		"""Liste les noms déjà donnés, pour la liste déroulante.
+
+		Returns:
+			list[str]: Noms, triés sans tenir compte de la casse.
+		"""
 		names = {p.name for p in self.app.library.persons.values() if p.name}
 		return sorted(names, key = str.casefold)
 
 	def filter_choices(self, event: tk.Event) -> None:
-		"""Restreint la liste déroulante aux noms qui contiennent le texte tapé."""
+		"""Restreint la liste déroulante aux noms qui contiennent le texte tapé, sans tenir compte de la casse.
+
+		Args:
+			event (tk.Event): Événement `<KeyRelease>` du champ (inutilisé).
+		"""
 		typed = self.variable.get().casefold()
 		self.combobox.configure(values = [n for n in self.known_names() if typed in n.casefold()])
 
@@ -1565,11 +2039,78 @@ class UnknownNamesDialog(tk.Toplevel):
 
 
 class FaceTaggerApp(tk.Tk):
-	"""Fenêtre principale de l'application."""
+	"""Fenêtre principale de l'application.
+
+	Les threads de travail (analyse, écriture, restauration) ne touchent jamais Tk : ils envoient des événements par `post`, traités par `poll_events` dans le thread de l'interface.
+
+	Attributes:
+		options (argparse.Namespace): Options de la ligne de commande (voir `parse_arguments`).
+		data_directory (Path): Dossier de données (modèles de DeepFace, base).
+		exiftool (ExifTool): Adaptateur d'ExifTool.
+		library (Library): Photothèque : visages, personnes et étiquettes.
+		database (Database): Base SQLite.
+		events (queue.Queue): Événements envoyés par les threads de travail à l'interface.
+		cancel_event (threading.Event): Demande d'arrêt du travail en cours.
+		worker (Optional[threading.Thread]): Dernier thread de travail lancé, ou None.
+		current_person (Optional[Person]): Personne dont les vignettes sont affichées, ou `None`.
+		icon_cache (dict[int, ImageTk.PhotoImage]): Icônes de la liste des personnes, par identifiant de visage.
+		face_images (list[ImageTk.PhotoImage]): Images des vignettes de la page affichée (références conservées).
+		face_labels (list[ttk.Label]): Vignettes de la page affichée, dans l'ordre.
+		sorted_faces (list[FaceRecord]): Visages de la personne affichée, du plus net au moins net.
+		page (int): Rang de la page affichée, à partir de `0`.
+		grid_columns (int): Nombre de colonnes de la grille des vignettes.
+		busy (bool): `True` pendant une analyse, une écriture ou une restauration.
+		selected_faces (set[FaceRecord]): Visages sélectionnés parmi ceux de la personne affichée.
+		selection_anchor (Optional[int]): Rang, dans `sorted_faces`, de la dernière vignette cliquée (pour Maj + clic).
+		face_index (dict[FaceRecord, int]): Rang de chaque visage dans `sorted_faces`.
+		face_widgets (dict[FaceRecord, ttk.Label]): Vignette de chaque visage de la page affichée.
+		chosen_photos (list[str]): Photos choisies une à une par « Photos… » (chemins absolus).
+		chosen_label (str): Libellé des photos choisies, affiché dans le champ « Dossier ».
+		directory_var (tk.StringVar): Contenu du champ « Dossier ».
+		threshold_var (tk.DoubleVar): Seuil de similarité réglé par le curseur.
+		keywords_var (tk.BooleanVar): Case « Utiliser aussi les mots-clés comme noms candidats ».
+		write_regions_var (tk.BooleanVar): Case « Écrire » des régions de visages.
+		write_person_var (tk.BooleanVar): Case « Écrire » de `PersonInImage`.
+		write_keywords_var (tk.BooleanVar): Case « Écrire » des mots-clés.
+		backup_var (tk.BooleanVar): Case de la sauvegarde `*_original`.
+		page_size_var (tk.StringVar): Nombre de vignettes par page choisi.
+		status_var (tk.StringVar): Texte de la barre d'état.
+		scan_button (ttk.Button): Bouton « Analyser ».
+		stop_button (ttk.Button): Bouton « Arrêter ».
+		threshold_label (ttk.Label): Valeur du seuil, affichée à côté du curseur.
+		regroup_button (ttk.Button): Bouton « Regrouper à nouveau ».
+		tree (ttk.Treeview): Liste des personnes.
+		heading_tips (dict[str, str]): Infobulle de chaque en-tête de la liste, par identifiant de colonne.
+		person_title (ttk.Label): Titre de la personne affichée.
+		first_button (ttk.Button): Bouton de la première page.
+		previous_button (ttk.Button): Bouton de la page précédente.
+		page_label (ttk.Label): Numéro de la page affichée et nombre de pages.
+		next_button (ttk.Button): Bouton de la page suivante.
+		last_button (ttk.Button): Bouton de la dernière page.
+		range_label (ttk.Label): Rangs des vignettes de la page affichée.
+		page_size_box (ttk.Combobox): Choix du nombre de vignettes par page.
+		selection_label (ttk.Label): Nombre de vignettes sélectionnées.
+		select_all_button (ttk.Button): Bouton « Tout sélectionner ».
+		selection_buttons (list[ttk.Button]): Boutons qui agissent sur les vignettes sélectionnées.
+		canvas (tk.Canvas): Zone défilante des vignettes.
+		faces_frame (ttk.Frame): Cadre des vignettes, placé dans `canvas`.
+		validate_button (ttk.Button): Bouton « Valider la personne ».
+		write_button (ttk.Button): Bouton « Tout écrire… ».
+		restore_button (ttk.Button): Bouton « Restaurer les sauvegardes… ».
+		progress (ttk.Progressbar): Barre de progression.
+		log_text (tk.Text): Journal.
+	"""
 
 	def __init__(self, options: argparse.Namespace) -> None:
-		"""Crée la fenêtre principale d'après les options de la ligne de commande, ouvre la base et
-		vérifie la présence d'ExifTool.
+		"""Crée la fenêtre principale d'après les options de la ligne de commande.
+
+		Déclare l'identité de l'application et la gestion des écrans à haute résolution, applique le thème, ouvre la base, cherche ExifTool, construit les widgets, puis lance la lecture périodique des événements.
+
+		Args:
+			options (argparse.Namespace): Options lues par `parse_arguments` et complétées par `main` (seuil, chemin de la base).
+
+		Raises:
+			RuntimeError: Si la base a été créée par une version plus récente de Face Tagger.
 		"""
 		# Avant super().__init__() : l'identité dans la barre des tâches et la gestion de la résolution de l'écran
 		# doivent précéder la création de la première fenêtre
@@ -1651,8 +2192,7 @@ class FaceTaggerApp(tk.Tk):
 	# ---------- Construction de la fenêtre ----------
 
 	def build_widgets(self) -> None:
-		"""Construit la fenêtre : dossier, réglages, liste des personnes, vignettes, écriture, progression et
-		journal. Doit suivre apply_dark_theme(), qui remplit la base d'options du thème sombre.
+		"""Construit la fenêtre : dossier, réglages, liste des personnes, vignettes, écriture, progression et journal. Doit suivre `apply_dark_theme()`, qui remplit la base d'options du thème sombre.
 		"""
 		style = ttk.Style(self)
 		style.configure("Treeview", rowheight = scaled(TREE_ROW_HEIGHT))
@@ -2059,7 +2599,13 @@ class FaceTaggerApp(tk.Tk):
 	# ---------- Journal et communication avec les threads ----------
 
 	def log(self, message: str) -> None:
-		"""Ajoute un message au journal de la fenêtre et à la console."""
+		"""Ajoute un message au journal de la fenêtre et à la console.
+
+		À appeler depuis le thread de l'interface ; les threads de travail passent par `post("log", message)`.
+
+		Args:
+			message (str): Message à afficher (ses emojis sont retirés avec `--no-emoji`).
+		"""
 		message = emoji(message)
 		print(message, flush = True)
 		self.log_text.configure(state = "normal")
@@ -2068,11 +2614,24 @@ class FaceTaggerApp(tk.Tk):
 		self.log_text.configure(state = "disabled")
 
 	def post(self, *event: object) -> None:
-		"""Envoie un événement vers le thread de l'interface (appelable depuis un thread de travail)."""
+		"""Envoie un événement au thread de l'interface ; appelable depuis un thread de travail.
+
+		Args:
+			*event (object): Type de l'événement (« `log` », « `progress` », « `library` », « `tags` », « `restored` » ou « `done` »), suivi de ses données (voir `poll_events`).
+		"""
 		self.events.put(event)
 
 	def poll_events(self) -> None:
-		"""Traite les événements envoyés par les threads de travail (appelée toutes les 100 ms)."""
+		"""Traite les événements envoyés par les threads de travail, puis se reprogramme 100 ms plus tard.
+
+		Événements reconnus :
+		- (« `log` », message) : ajoute le message au journal ;
+		- (« `progress` », fait, total, texte) : met à jour la barre de progression et la barre d'état ;
+		- (« `library` », photothèque) : remplace la photothèque et reconstruit la liste des personnes ;
+		- (« `tags` », `{photo: PhotoTags}`) : étiquettes relues après une écriture ;
+		- (« `restored` », photos) : photos restaurées depuis leur sauvegarde ;
+		- (« `done` »,) : fin du travail, les boutons sont réactivés.
+		"""
 		try:
 			while True:
 				event = self.events.get_nowait()
@@ -2099,7 +2658,11 @@ class FaceTaggerApp(tk.Tk):
 		self.after(100, self.poll_events)
 
 	def set_busy(self, busy: bool) -> None:
-		"""Active ou désactive les boutons pendant une analyse, une écriture ou une restauration."""
+		"""Active ou désactive les boutons pendant une analyse, une écriture ou une restauration.
+
+		Args:
+			busy (bool): True au début d'un travail, False à sa fin.
+		"""
 		self.busy = busy
 		state = "disabled" if busy else "normal"
 		for button in (self.scan_button, self.write_button, self.regroup_button, self.restore_button):
@@ -2144,11 +2707,19 @@ class FaceTaggerApp(tk.Tk):
 		self.directory_var.set(self.chosen_label)
 
 	def using_chosen_photos(self) -> bool:
-		"""Vrai si le champ « Dossier » affiche encore le libellé des photos choisies (il n'a pas été modifié depuis)."""
+		"""Indique si l'analyse porte sur les photos choisies une à une plutôt que sur un dossier.
+
+		Returns:
+			bool: `True` si des photos ont été choisies et que le champ « Dossier » affiche encore leur libellé (il n'a pas été modifié depuis).
+		"""
 		return bool(self.chosen_photos) and self.directory_var.get() == self.chosen_label
 
 	def base_directory(self) -> str:
-		"""Dossier de départ des boîtes de dialogue : celui des photos choisies, ou le dossier saisi."""
+		"""Donne le dossier de départ des boîtes de dialogue.
+
+		Returns:
+			str: Dossier des photos choisies, sinon dossier saisi, ou à défaut dossier personnel.
+		"""
 		if self.using_chosen_photos():
 			return os.path.dirname(self.chosen_photos[0])
 		return self.directory_var.get().strip() or str(Path.home())
@@ -2185,7 +2756,16 @@ class FaceTaggerApp(tk.Tk):
 		self.worker.start()
 
 	def create_engine(self) -> FaceEngine:
-		"""Charge DeepFace et ses deux réseaux. N'est appelée que si une photo doit être analysée."""
+		"""Charge DeepFace et ses deux réseaux ; n'est appelée que si une photo doit être analysée.
+
+		Exécutée dans le thread d'analyse : les messages passent par `post`.
+
+		Returns:
+			FaceEngine: Moteur prêt, réglé d'après les options de la ligne de commande.
+
+		Raises:
+			RuntimeError: Si DeepFace est introuvable.
+		"""
 		self.post("log", f"🧠 Chargement de DeepFace (détecteur {self.options.detector}, modèle {self.options.model})…")
 		weights = self.data_directory / ".deepface" / "weights"
 		if not weights.is_dir() or not any(weights.iterdir()):
@@ -2200,10 +2780,23 @@ class FaceTaggerApp(tk.Tk):
 			self.options.detection_score,
 		)
 
-	def scan_worker(self, directory: Optional[str], photos: Optional[list[str]], threshold: float, use_keywords: bool) -> None:
-		"""Détecte les visages, lit les étiquettes existantes puis regroupe (exécuté hors du thread Tk).
-		Analyse le dossier `directory`, ou seulement les photos choisies `photos`. Ce qui est déjà en base pour une
-		photo inchangée n'est ni ré-analysé ni relu."""
+	def scan_worker(
+			self,
+			directory: Optional[str],
+			photos: Optional[list[str]],
+			threshold: float,
+			use_keywords: bool
+		) -> None:
+		"""Détecte les visages, lit les étiquettes existantes puis regroupe les visages (exécuté hors du thread Tk).
+
+		Ce qui est déjà en base pour une photo inchangée n'est ni ré-analysé ni relu. Le résultat est envoyé à l'interface par un événement « `library` » ; les erreurs sont écrites dans le journal, et l'événement « done » est envoyé dans tous les cas.
+
+		Args:
+			directory (Optional[str]): Dossier à parcourir (sous-dossiers compris), ou `None` si `photos` est fourni.
+			photos (Optional[list[str]]): Photos choisies une à une (chemins absolus), ou `None` pour parcourir `directory`.
+			threshold (float): Seuil de similarité cosinus du regroupement.
+			use_keywords (bool): `True` pour accepter aussi les mots-clés comme noms de personnes.
+		"""
 		try:
 			if photos is None:
 				self.post("log", f"📂 Exploration de {directory}…")
@@ -2318,7 +2911,11 @@ class FaceTaggerApp(tk.Tk):
 	# ---------- Liste des personnes ----------
 
 	def refresh_persons(self, select: Optional[list[int]] = None) -> None:
-		"""Reconstruit la liste des personnes (nommées d'abord, puis inconnues par taille décroissante)."""
+		"""Reconstruit la liste des personnes : nommées d'abord (ordre alphabétique), puis inconnues (les plus grandes d'abord).
+
+		Args:
+			select (Optional[list[int]]): Identifiants des personnes à sélectionner ensuite ; `None` pour conserver la sélection actuelle. Faute de personne à sélectionner, la première de la liste l'est.
+		"""
 		if select is None:
 			select = [int(i) for i in self.tree.selection()]
 		self.tree.delete(*self.tree.get_children())
@@ -2361,16 +2958,33 @@ class FaceTaggerApp(tk.Tk):
 		self.update_action_states()
 
 	def write_fields(self) -> tuple[bool, bool, bool]:
-		"""Cases « Écrire » cochées : régions de visages, PersonInImage, mots-clés."""
+		"""Lit les cases « Écrire ».
+
+		Returns:
+			tuple[bool, bool, bool]: États des cases des régions de visages, de `PersonInImage` et des mots-clés.
+		"""
 		return self.write_regions_var.get(), self.write_person_var.get(), self.write_keywords_var.get()
 
 	def missing_photos(self, person: Person) -> list[str]:
-		"""Photos de la personne où son nom manque encore, pour les cases « Écrire » cochées."""
+		"""Liste les photos de la personne où son nom manque encore, pour les cases « Écrire » cochées.
+
+		Args:
+			person (Person): Personne concernée.
+
+		Returns:
+			list[str]: Chemins triés des photos à écrire (voir `photos_missing_name`).
+		"""
 		return photos_missing_name(self.library, person, *self.write_fields())
 
 	def person_status(self, person: Person) -> str:
-		"""Texte de la colonne « Métadonnées » : nom déjà présent dans toutes les photos, ou nombre de photos à écrire.
-		Vide quand il n'y a rien à évaluer (personne sans nom, ExifTool absent, aucune case « Écrire » cochée)."""
+		"""Calcule le texte de la colonne « Métadonnées » d'une personne.
+
+		Args:
+			person (Person): Personne de la ligne.
+
+		Returns:
+			str: « 🙈 ignorée », « ✅ à jour » si son nom est déjà dans toutes ses photos, ou le nombre de photos à écrire ; vide quand il n'y a rien à évaluer (personne sans nom, ExifTool absent, aucune case « Écrire » cochée).
+		"""
 		if person.ignored:
 			return "🙈 ignorée"
 		if not person.name or not self.exiftool.available or not any(self.write_fields()):
@@ -2380,22 +2994,29 @@ class FaceTaggerApp(tk.Tk):
 		return "✅ à jour" if missing == 0 else f"✏ {missing} à écrire"
 
 	def update_person_statuses(self) -> None:
-		"""Met à jour la seule colonne « Métadonnées » (après une écriture, ou quand une case « Écrire » change),
-		sans reconstruire la liste : la sélection, la page et la position dans la page sont conservées."""
+		"""Met à jour la seule colonne « Métadonnées » (après une écriture, ou quand une case « Écrire » change), sans reconstruire la liste : la sélection, la page et la position dans la page sont conservées."""
 		for iid in self.tree.get_children():
 			person = self.library.persons.get(int(iid))
 			if person is not None:
 				self.tree.set(iid, "status", emoji(self.person_status(person)))
 
 	def update_action_states(self) -> None:
-		"""« Valider la personne » n'est actif que pour une seule personne, nommée et non ignorée, hors travail en cours."""
+		"""« Valider la personne » n'est actif que pour une seule personne, nommée et non ignorée, hors travail en cours."""
 		selected = self.selected_persons()
 		ready = not self.busy and len(selected) == 1 and bool(selected[0].name) and not selected[0].ignored
 		self.validate_button.configure(state = "normal" if ready else "disabled")
 
 	def tree_tooltip(self, event: tk.Event) -> Optional[str]:
-		"""Infobulle de la liste des personnes : rôle de la colonne sur les en-têtes, résumé de la personne sur les
-		lignes (utile quand son nom est trop long pour la colonne)."""
+		"""Calcule l'infobulle de la liste des personnes à l'endroit survolé.
+
+		Sur les en-têtes, elle décrit le rôle de la colonne ; sur les lignes, elle résume la personne (utile quand son nom est trop long pour la colonne).
+
+		Args:
+			event (tk.Event): Événement de la souris sur la liste.
+
+		Returns:
+			Optional[str]: Texte de l'infobulle, ou None hors des en-têtes et des lignes.
+		"""
 		region = self.tree.identify_region(event.x, event.y)
 		if region == "heading":
 			return self.heading_tips.get(self.tree.identify_column(event.x))
@@ -2424,12 +3045,20 @@ class FaceTaggerApp(tk.Tk):
 		)
 
 	def selected_persons(self) -> list[Person]:
-		"""Personnes sélectionnées dans la liste (seulement celles qui existent encore)."""
+		"""Liste les personnes sélectionnées dans la liste.
+
+		Returns:
+			list[Person]: Personnes sélectionnées qui existent encore dans la photothèque.
+		"""
 		return [self.library.persons[int(i)] for i in self.tree.selection() if int(i) in self.library.persons]
 
 	def on_select(self, event: Optional[tk.Event] = None) -> None:
-		"""Changement de sélection dans la liste : affiche la personne choisie (ou le nombre de personnes
-		sélectionnées) et met à jour les boutons.
+		"""Réagit à un changement de sélection dans la liste des personnes.
+
+		Affiche la personne choisie (ou le nombre de personnes sélectionnées) et met à jour les boutons.
+
+		Args:
+			event (Optional[tk.Event]): Événement `<<TreeviewSelect>>` (inutilisé), ou `None` lors d'un appel direct.
 		"""
 		selected = self.selected_persons()
 		# La page courante est conservée tant que la personne affichée ne change pas
@@ -2439,14 +3068,25 @@ class FaceTaggerApp(tk.Tk):
 		self.update_action_states()
 
 	def page_size(self) -> int:
-		"""Nombre de vignettes par page (réglable dans l'interface)."""
+		"""Lit le nombre de vignettes par page choisi dans l'interface.
+
+		Returns:
+			int: Nombre de vignettes par page : au moins 10, et 100 si la valeur saisie est illisible.
+		"""
 		try:
 			return max(10, int(self.page_size_var.get()))
 		except (ValueError, tk.TclError):
 			return 100
 
 	def show_person(self, person: Optional[Person], keep_page: bool = False) -> None:
-		"""Affiche une personne : ses visages sont triés du plus net au moins net, puis découpés en pages."""
+		"""Affiche les visages d'une personne, triés du plus net au moins net puis découpés en pages.
+
+		La sélection de vignettes est vidée si la personne affichée change.
+
+		Args:
+			person (Optional[Person]): Personne à afficher, ou `None` pour vider la zone des vignettes.
+			keep_page (bool): `True` pour rester sur la page courante si la personne affichée ne change pas.
+		"""
 		changed = person is not self.current_person
 		self.current_person = person
 		self.sorted_faces = sorted(person.faces, key = lambda f: -f.score) if person is not None else []
@@ -2465,13 +3105,16 @@ class FaceTaggerApp(tk.Tk):
 		self.render_page()
 
 	def go_to_page(self, page: int) -> None:
-		"""Affiche la page demandée (ramenée dans les limites existantes)."""
+		"""Affiche une page des vignettes de la personne.
+
+		Args:
+			page (int): Rang de la page, à partir de `0` ; il est ramené dans les limites existantes.
+		"""
 		self.page = page
 		self.render_page()
 
 	def render_page(self) -> None:
-		"""Construit les vignettes de la page courante. Les images des autres pages sont libérées :
-		la mémoire utilisée dépend de la taille de la page, pas du nombre de visages de la personne."""
+		"""Construit les vignettes de la page courante. Les images des autres pages sont libérées : la mémoire utilisée dépend de la taille de la page, pas du nombre de visages de la personne."""
 		for child in self.faces_frame.winfo_children():
 			child.destroy()
 		self.face_images.clear()
@@ -2540,7 +3183,11 @@ class FaceTaggerApp(tk.Tk):
 		self.canvas.yview_moveto(0)
 
 	def layout_faces(self, force: bool = False) -> None:
-		"""Place les vignettes en grille. N'est refaite que si le nombre de colonnes change."""
+		"""Place les vignettes de la page en grille, selon la largeur de la zone.
+
+		Args:
+			force (bool): `True` pour replacer les vignettes même si le nombre de colonnes n'a pas changé.
+		"""
 		columns = max(1, self.canvas.winfo_width() // scaled(THUMBNAIL_SIZE + 24))
 		if columns == self.grid_columns and not force:
 			return
@@ -2558,10 +3205,9 @@ class FaceTaggerApp(tk.Tk):
 	def click_face(self, face: FaceRecord, mode: str) -> None:
 		"""Sélectionne des vignettes comme dans l'Explorateur.
 
-		- « single » (clic) : cette vignette seule ;
-		- « toggle » (Ctrl + clic) : ajoute la vignette à la sélection, ou l'en retire ;
-		- « range » (Maj + clic) : toutes les vignettes entre la dernière cliquée et celle-ci, pages précédentes
-			comprises (les rangs sont ceux de la liste complète des visages de la personne).
+		Args:
+			face (FaceRecord): Visage de la vignette cliquée.
+			mode (str): « `single` » (clic) : cette vignette seule ; « `toggle` » (Ctrl + clic) : ajoute la vignette à la sélection, ou l'en retire ; « `range` » (Maj + clic) : toutes les vignettes entre la dernière cliquée et celle-ci, pages précédentes comprises (les rangs sont ceux de la liste complète des visages).
 		"""
 		# Les raccourcis clavier (Ctrl + A, Échap, Suppr) sont liés au canevas : il prend le focus
 		self.canvas.focus_set()
@@ -2609,16 +3255,29 @@ class FaceTaggerApp(tk.Tk):
 		self.select_all_button.configure(state = "normal" if self.sorted_faces else "disabled")
 
 	def selected_face_list(self) -> list[FaceRecord]:
-		"""Visages sélectionnés, dans l'ordre d'affichage. Seuls comptent ceux qui appartiennent encore à la personne
-		affichée : une autre action (fusion, renommage) a pu les en retirer depuis."""
+		"""Liste les visages sélectionnés, dans l'ordre d'affichage.
+
+		Seuls comptent ceux qui appartiennent encore à la personne affichée : une autre action (fusion, renommage) a pu les en retirer depuis.
+
+		Returns:
+			list[FaceRecord]: Visages sélectionnés, du plus net au moins net.
+		"""
 		return [
 			face for face in self.sorted_faces
 			if face in self.selected_faces and face.person is self.current_person and not face.deleted
 		]
 
-	def after_faces_changed(self, origin: Optional[Person], fallback: Optional[Person] = None) -> None:
-		"""Vide la sélection et réaffiche la liste après un déplacement ou une suppression de visages. La personne
-		d'origine reste affichée si elle existe encore, sinon `fallback`."""
+	def after_faces_changed(
+			self,
+			origin: Optional[Person],
+			fallback: Optional[Person] = None
+		) -> None:
+		"""Vide la sélection et reconstruit la liste après un déplacement ou une suppression de visages.
+
+		Args:
+			origin (Optional[Person]): Personne affichée avant l'opération, qui le reste si elle existe encore.
+			fallback (Optional[Person]): Personne à afficher si `origin` n'existe plus ; à défaut, la première de la liste.
+		"""
 		self.selected_faces = set()
 		self.selection_anchor = None
 		if origin is not None and origin.identifier in self.library.persons:
@@ -2632,7 +3291,11 @@ class FaceTaggerApp(tk.Tk):
 	# ---------- Actions sur les personnes et les visages ----------
 
 	def known_names(self) -> list[str]:
-		"""Noms déjà donnés, triés sans tenir compte de la casse, pour les boîtes de saisie."""
+		"""Liste les noms déjà donnés, pour les boîtes de saisie.
+
+		Returns:
+			list[str]: Noms, triés sans tenir compte de la casse.
+		"""
 		return sorted({p.name for p in self.library.persons.values() if p.name}, key = str.casefold)
 
 	def rename_selected(self) -> None:
@@ -2689,12 +3352,22 @@ class FaceTaggerApp(tk.Tk):
 		self.refresh_persons()
 
 	def open_photo(self, face: FaceRecord) -> None:
-		"""Affiche la photo entière d'un visage, avec le cadre et le nom de chaque visage."""
+		"""Affiche la photo entière d'un visage, avec le cadre et le nom de chaque visage.
+
+		Args:
+			face (FaceRecord): Visage dont on ouvre la photo.
+		"""
 		PhotoViewer(self, self.library, face)
 
 	def face_menu(self, event: tk.Event, face: FaceRecord) -> None:
-		"""Menu contextuel d'une vignette. Ses commandes portent sur toute la sélection si la vignette en fait
-		partie, sinon sur cette seule vignette (qui devient alors la sélection)."""
+		"""Ouvre le menu contextuel d'une vignette.
+
+		Ses commandes portent sur toute la sélection si la vignette en fait partie, sinon sur cette seule vignette, qui devient alors la sélection.
+
+		Args:
+			event (tk.Event): Clic droit, qui donne la position du menu à l'écran.
+			face (FaceRecord): Visage de la vignette cliquée.
+		"""
 		if face not in self.selected_faces:
 			self.click_face(face, "single")
 		count = len(self.selected_face_list())
@@ -2772,9 +3445,20 @@ class FaceTaggerApp(tk.Tk):
 
 	# ---------- Écriture des métadonnées (thread de travail) ----------
 
-	def collect_updates(self, persons: list[Person]) -> dict[str, list[tuple[str, FaceRecord]]]:
-		"""Regroupe par photo les (nom, visage) à écrire pour les personnes données (nommées et non ignorées).
-		Seules les photos où le nom manque encore sont retenues : les autres sont déjà à jour."""
+	def collect_updates(
+			self,
+			persons: list[Person]
+		) -> dict[str, list[tuple[str, FaceRecord]]]:
+		"""Regroupe par photo les noms à écrire pour les personnes données.
+
+		Les personnes sans nom ou ignorées sont sautées, et seules les photos où le nom manque encore sont retenues : les autres sont déjà à jour.
+
+		Args:
+			persons (list[Person]): Personnes dont on veut écrire le nom.
+
+		Returns:
+			dict[str, list[tuple[str, FaceRecord]]]: Couples (nom, visage) à écrire, par chemin de photo.
+		"""
 		updates: dict[str, list[tuple[str, FaceRecord]]] = {}
 		for person in persons:
 			if not person.name or person.ignored:
@@ -2786,7 +3470,11 @@ class FaceTaggerApp(tk.Tk):
 		return updates
 
 	def can_write(self) -> bool:
-		"""Vérifie qu'une écriture est possible (ExifTool présent, au moins une case « Écrire » cochée)."""
+		"""Vérifie qu'une écriture est possible, et sinon l'explique dans une boîte de dialogue.
+
+		Returns:
+			bool: `True` si ExifTool est présent et qu'au moins une case « Écrire » est cochée.
+		"""
 		if not self.exiftool.available:
 			messagebox.showerror(
 				emoji("❌ ExifTool manquant"),
@@ -2802,14 +3490,17 @@ class FaceTaggerApp(tk.Tk):
 		return True
 
 	def backup_note(self) -> str:
-		"""Rappel de la sauvegarde *_original, ajouté aux demandes de confirmation."""
+		"""Rédige le rappel de la sauvegarde *_original, ajouté aux demandes de confirmation.
+
+		Returns:
+			str: Phrase précédée d'un saut de ligne, qui annonce la copie *_original ou son absence.
+		"""
 		if self.backup_var.get():
 			return "\nUne copie *_original de chaque photo sera conservée."
 		return "\n⚠️ Les photos seront modifiées sans copie de sauvegarde."
 
 	def validate_person(self) -> None:
-		"""Écrit dans les métadonnées le nom d'une seule personne, celle qui est sélectionnée, après vérification
-		de ses vignettes par l'utilisateur."""
+		"""Écrit dans les métadonnées le nom d'une seule personne, celle qui est sélectionnée, après vérification de ses vignettes par l'utilisateur."""
 		selected = self.selected_persons()
 		if len(selected) != 1:
 			messagebox.showinfo(emoji("✅ Valider"), "Sélectionnez une seule personne.")
@@ -2858,7 +3549,13 @@ class FaceTaggerApp(tk.Tk):
 		self.launch_write(updates)
 
 	def launch_write(self, updates: dict[str, list[tuple[str, FaceRecord]]]) -> None:
-		"""Lance l'écriture dans un thread de travail (les cases sont lues ici, dans le thread de l'interface)."""
+		"""Lance l'écriture des métadonnées dans un thread de travail.
+
+		Les cases sont lues ici, dans le thread de l'interface : le thread de travail ne touche jamais Tk.
+
+		Args:
+			updates (dict[str, list[tuple[str, FaceRecord]]]): Couples (nom, visage) à écrire, par chemin de photo (voir `collect_updates`).
+		"""
 		self.cancel_event.clear()
 		self.set_busy(True)
 		write_options = (
@@ -2874,9 +3571,19 @@ class FaceTaggerApp(tk.Tk):
 		)
 		self.worker.start()
 
-	def write_worker(self, updates: dict[str, list[tuple[str, FaceRecord]]], write_options: tuple) -> None:
-		"""Écrit les métadonnées par lots (exécuté hors du thread Tk). Après chaque lot, les étiquettes sont
-		relues pour vérifier l'écriture, puis la base est mise à jour (signature, étiquettes, historique)."""
+	def write_worker(
+			self,
+			updates: dict[str, list[tuple[str, FaceRecord]]],
+			write_options: tuple
+		) -> None:
+		"""Écrit les métadonnées par lots de `EXIFTOOL_BATCH` photos (exécuté hors du thread Tk).
+
+		Après chaque lot, les photos sont relues pour vérifier l'écriture, puis la base est mise à jour (signature, étiquettes, historique) et les étiquettes relues sont envoyées à l'interface (événement « `tags` »). Les erreurs sont écrites dans le journal, et l'événement « `done` » est envoyé dans tous les cas.
+
+		Args:
+			updates (dict[str, list[tuple[str, FaceRecord]]]): Couples (nom, visage) à écrire, par chemin de photo.
+			write_options (tuple): Quatre booléens : écrire les régions de visages, écrire `PersonInImage`, écrire les mots-clés, conserver une sauvegarde `*_original`.
+		"""
 		write_regions, write_person, write_keywords, backup = write_options
 		fields = [label for flag, label in ((write_regions, "regions"), (write_person, "PersonInImage"), (write_keywords, "keywords")) if flag]
 		try:
@@ -2912,7 +3619,14 @@ class FaceTaggerApp(tk.Tk):
 					removed = {name_key(old) for old in replacements} - {name_key(name) for name in names}
 
 					def kept(existing: list[str]) -> list[str]:
-						"""Liste existante, sans les anciens noms remplacés par un renommage."""
+						"""Retire d'une liste existante les anciens noms remplacés par un renommage.
+
+						Args:
+							existing (list[str]): Noms déjà présents dans le champ.
+
+						Returns:
+							list[str]: Noms conservés, dans leur ordre d'origine.
+						"""
 						return [name for name in existing if name_key(name) not in removed]
 
 					if write_person:
@@ -2999,7 +3713,7 @@ class FaceTaggerApp(tk.Tk):
 	# ---------- Restauration des sauvegardes *_original ----------
 
 	def start_restore(self) -> None:
-		"""Restaure d'un coup toutes les photos d'un dossier à partir de leurs sauvegardes *_original."""
+		"""Restaure d'un coup toutes les photos d'un dossier à partir de leurs sauvegardes `*_original`."""
 		directory = filedialog.askdirectory(
 			initialdir = self.base_directory(),
 			title = "Dossier contenant les fichiers *_original",
@@ -3029,7 +3743,13 @@ class FaceTaggerApp(tk.Tk):
 		self.worker.start()
 
 	def restore_worker(self, backups: list[tuple[str, str]]) -> None:
-		"""Restaure les photos puis met la base à jour (exécuté hors du thread Tk)."""
+		"""Restaure les photos depuis leurs sauvegardes, puis met la base à jour (exécuté hors du thread Tk).
+
+		Les photos restaurées sont envoyées à l'interface (événement « `restored` ») ; l'événement « `done` » est envoyé dans tous les cas.
+
+		Args:
+			backups (list[tuple[str, str]]): Couples (sauvegarde, photo) trouvés par `restore_originals.find_backups`.
+		"""
 		try:
 			self.post(
 				"log",
@@ -3054,7 +3774,13 @@ class FaceTaggerApp(tk.Tk):
 			self.post("done")
 
 	def after_restore(self, targets: set[str]) -> None:
-		"""Les étiquettes en mémoire ne correspondent plus aux fichiers restaurés : on repart d'une liste vide."""
+		"""Vide la photothèque si des photos restaurées en font partie.
+
+		Les étiquettes en mémoire ne correspondent plus aux fichiers restaurés : on repart d'une liste vide, et la prochaine analyse relit leurs étiquettes.
+
+		Args:
+			targets (set[str]): Chemins des photos restaurées.
+		"""
 		if targets & {face.photo for face in self.library.faces}:
 			self.library = Library()
 			self.refresh_persons()
@@ -3068,8 +3794,10 @@ class FaceTaggerApp(tk.Tk):
 def parse_arguments() -> argparse.Namespace:
 	"""Lit les options de la ligne de commande.
 
-	Les valeurs par défaut qui dépendent d'autres options (seuil du modèle, chemin de la base) sont
-	complétées ensuite par main().
+	Les valeurs par défaut qui dépendent d'autres options (seuil du modèle, chemin de la base) sont complétées ensuite par `main()`.
+
+	Returns:
+		argparse.Namespace: Options lues : `directory`, `data_directory`, `database`, `page_size`, `exiftool`, `model`, `detector`, `threshold`, `max_image_size`, `min_face_size`, `detection_score`, `no_backup`, `no_emoji` et `theme`.
 	"""
 	parser = argparse.ArgumentParser(
 		description = "👥 Regroupe les visages d'un dossier de photos par personne et écrit les noms dans les métadonnées."
@@ -3157,9 +3885,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
 	"""Point d'entrée : prépare la console, lit les options puis ouvre la fenêtre principale."""
-	# Exécutable fenêtré (PyInstaller --noconsole) : sys.stdout et sys.stderr valent None. Les barres de progression
-	# des téléchargements de DeepFace (tqdm) y écriraient et lèveraient une exception : ils sont redirigés vers le
-	# néant. Doit précéder l'analyse des arguments, qui écrit ses erreurs sur sys.stderr.
+	# Exécutable fenêtré (PyInstaller --noconsole) : sys.stdout et sys.stderr valent None. Les barres de progression des téléchargements de DeepFace (tqdm) y écriraient et lèveraient une exception : ils sont redirigés vers le néant. Doit précéder l'analyse des arguments, qui écrit ses erreurs sur sys.stderr.
 	for name in ("stdout", "stderr"):
 		if getattr(sys, name) is None:
 			setattr(sys, name, open(os.devnull, "w", encoding = "utf-8"))

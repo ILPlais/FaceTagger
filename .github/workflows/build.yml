@@ -27,8 +27,91 @@ env:
   RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
+  # ====================================================================
+  # Numéro de version : calculé une seule fois d'après le tag, puis
+  # reporté dans le version.txt de la branche principale du dépôt.
+  # ====================================================================
+  version:
+    name: Update version.txt
+    runs-on: ubuntu-latest
+    outputs:
+      tuple: ${{ steps.parse.outputs.tuple }}
+      dotted: ${{ steps.parse.outputs.dotted }}
+
+    steps:
+    # Tag → numéro à quatre chiffres (v1.2.3 → 1.2.3.0, v1.2.3.4 → 1.2.3.4).
+    # Un tag d'une autre forme (v2.0-beta…) arrête tout le workflow, plutôt
+    # que de produire des exécutables avec un numéro faux.
+    - name: Parse tag
+      id: parse
+      run: |
+        tag="${RELEASE_TAG#v}"
+        if [[ ! "$tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
+          echo "::error::❌ Tag « $RELEASE_TAG » invalide : format attendu v1.2.3 ou v1.2.3.4"
+          exit 1
+        fi
+        major="${BASH_REMATCH[1]}"
+        minor="${BASH_REMATCH[2]}"
+        patch="${BASH_REMATCH[3]}"
+        build="${BASH_REMATCH[5]:-0}"
+        echo "tuple=($major, $minor, $patch, $build)" >> "$GITHUB_OUTPUT"
+        echo "dotted=$major.$minor.$patch.$build" >> "$GITHUB_OUTPUT"
+        echo "✅ Version $major.$minor.$patch.$build"
+      shell: bash
+
+    # La branche principale (et non le tag) : c'est elle qu'on met à jour.
+    - name: Checkout default branch
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+
+    # Commit de version.txt sur la branche principale, seulement si le
+    # numéro du tag est plus récent que celui du fichier : la recompilation
+    # manuelle d'un ancien tag ne doit pas faire reculer la version.
+    # Un échec (branche protégée…) n'empêche pas la compilation : il est
+    # signalé par un avertissement dans le résumé du workflow.
+    # Le push fait avec GITHUB_TOKEN ne déclenche aucun autre workflow.
+    - name: Commit version.txt
+      continue-on-error: true
+      env:
+        TUPLE: ${{ steps.parse.outputs.tuple }}
+        DOTTED: ${{ steps.parse.outputs.dotted }}
+      run: |
+        current="$(grep -oP "StringStruct\('FileVersion', '\K[0-9.]+" version.txt)"
+        newest="$(printf '%s\n%s\n' "$current" "$DOTTED" | sort -V | tail -n 1)"
+        if [ "$current" = "$DOTTED" ]; then
+          echo "✅ version.txt est déjà en $DOTTED"
+          exit 0
+        fi
+        if [ "$newest" != "$DOTTED" ]; then
+          echo "⚠️ version.txt ($current) est plus récent que le tag ($DOTTED) : inchangé"
+          exit 0
+        fi
+        sed -E -i \
+          -e "s/(filevers|prodvers)=\([0-9, ]+\)/\1=$TUPLE/" \
+          -e "s/(StringStruct\('(FileVersion|ProductVersion)', ')[0-9.]+'/\1$DOTTED'/" \
+          version.txt
+        if [ "$(grep -cF "$TUPLE" version.txt)" -ne 2 ] || [ "$(grep -cF "'$DOTTED'" version.txt)" -ne 2 ]; then
+          echo "::warning::❌ version.txt n'a pas pu être mis à jour en $DOTTED"
+          exit 1
+        fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add version.txt
+        git commit --message "Version $DOTTED dans version.txt (release $RELEASE_TAG)."
+        if ! git push origin "HEAD:${{ github.event.repository.default_branch }}"; then
+          echo "::warning::❌ Impossible de pousser version.txt (branche protégée ?)"
+          exit 1
+        fi
+        echo "✅ version.txt mis à jour en $DOTTED ($current auparavant) et poussé"
+      shell: bash
+
+  # ====================================================================
+  # Compilation sur les trois systèmes
+  # ====================================================================
   build:
     name: Build on ${{ matrix.os }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -55,38 +138,27 @@ jobs:
       shell: bash
 
     # ------------------------------------------------------------------
-    # Mise à jour de version.txt d'après le tag (v1.2.3 → 1.2.3.0,
-    # v1.2.3.4 → 1.2.3.4). Seule la copie de travail du runner est modifiée
-    # (rien n'est commité) : l'exécutable porte toujours le numéro de la
-    # release, même si version.txt n'a pas été resynchronisé dans le dépôt.
-    # Un tag d'une autre forme (v2.0-beta…) arrête la compilation, plutôt que
-    # de produire un exécutable avec un numéro faux.
+    # Le commit du tag est antérieur au commit de version.txt fait par le
+    # job « version » : on réécrit donc aussi la copie de travail du runner,
+    # avec le numéro calculé par ce job, pour que l'exécutable le porte.
     # ------------------------------------------------------------------
     - name: Update version.txt from tag (Windows)
       if: matrix.os == 'windows-latest'
+      env:
+        TUPLE: ${{ needs.version.outputs.tuple }}
+        DOTTED: ${{ needs.version.outputs.dotted }}
       run: |
-        tag="${RELEASE_TAG#v}"
-        if [[ ! "$tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
-          echo "❌ Tag « $RELEASE_TAG » invalide : format attendu v1.2.3 ou v1.2.3.4"
-          exit 1
-        fi
-        major="${BASH_REMATCH[1]}"
-        minor="${BASH_REMATCH[2]}"
-        patch="${BASH_REMATCH[3]}"
-        build="${BASH_REMATCH[5]:-0}"
-        tuple="($major, $minor, $patch, $build)"
-        dotted="$major.$minor.$patch.$build"
         # filevers / prodvers (tuples) et FileVersion / ProductVersion (texte)
         sed -E -i \
-          -e "s/(filevers|prodvers)=\([0-9, ]+\)/\1=$tuple/" \
-          -e "s/(StringStruct\('(FileVersion|ProductVersion)', ')[0-9.]+'/\1$dotted'/" \
+          -e "s/(filevers|prodvers)=\([0-9, ]+\)/\1=$TUPLE/" \
+          -e "s/(StringStruct\('(FileVersion|ProductVersion)', ')[0-9.]+'/\1$DOTTED'/" \
           version.txt
         # Contrôle : les quatre champs doivent avoir été remplacés
-        if [ "$(grep -cF "$tuple" version.txt)" -ne 2 ] || [ "$(grep -cF "'$dotted'" version.txt)" -ne 2 ]; then
-          echo "❌ version.txt n'a pas pu être mis à jour en $dotted"
+        if [ "$(grep -cF "$TUPLE" version.txt)" -ne 2 ] || [ "$(grep -cF "'$DOTTED'" version.txt)" -ne 2 ]; then
+          echo "❌ version.txt n'a pas pu être mis à jour en $DOTTED"
           exit 1
         fi
-        echo "✅ version.txt mis à jour en $dotted"
+        echo "✅ version.txt mis à jour en $DOTTED"
       shell: bash
 
     # ------------------------------------------------------------------

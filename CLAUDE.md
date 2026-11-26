@@ -34,6 +34,10 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install --requirement requirements.txt
 
+# Windows x86_64 uniquement : ne garder que la version DirectML d'onnxruntime (voir plus bas)
+pip uninstall --yes onnxruntime onnxruntime-directml
+pip install --no-deps onnxruntime-directml
+
 # ExifTool : programme externe indispensable (lecture et écriture des métadonnées)
 winget install --id OliverBetz.ExifTool --exact
 
@@ -43,6 +47,7 @@ python face_tagger.py --directory "D:\Photos"
 
 - Tkinter n'est pas sur PyPI : il est fourni par l'installeur de python.org (case « tcl/tk and IDLE »). Contrôle : `python -m tkinter`.
 - Ne jamais installer `opencv-python` et `opencv-python-headless` (ou `opencv-contrib-python-headless`) ensemble. DeepFace dépend de `opencv-contrib-python-headless` : `opencv-python` a été désinstallé du `.venv`.
+- **onnxruntime selon la plateforme** (`requirements.txt`) : `onnxruntime-directml` sous Windows x86_64 (seule plateforme où PyPI le publie, version 1.24.4 en novembre 2026), `onnxruntime` ailleurs (il contient CoreML sous macOS ; `onnxruntime-gpu` écarté sous Linux, car il imposerait plusieurs Go de bibliothèques NVIDIA). DeepFace dépend toujours de `onnxruntime` : sous Windows x86_64, pip installe donc les **deux** paquets, qui écrivent dans le même dossier `onnxruntime`. D'où la désinstallation puis la réinstallation de DirectML seul (`--no-deps`), faites aussi par le workflow, qui vérifie la présence de `DmlExecutionProvider`.
 - Versions dans le `.venv` actuel : Python 3.14, DeepFace 0.0.105, onnxruntime 1.32.0, opencv-contrib-python-headless 5.1.0.95, NumPy 2.5.4, Pillow 13.0.0, pillow-heif 1.8.1, PyInstaller 6.22.3. **Ni TensorFlow ni PyTorch** : DeepFace 0.0.105 s'exécute avec onnxruntime. (`ttkthemes` y est aussi installé mais n'est ni utilisé ni dans `requirements.txt`.)
 - Au premier lancement, DeepFace télécharge les poids (≈ 255 Mo : `arcface_weights.onnx` 137 Mo, `retinaface.onnx` 118 Mo) dans `%USERPROFILE%\.face_tagger\.deepface\weights`. L'ancien dossier `models` (YuNet, SFace) ne sert plus.
 
@@ -155,6 +160,7 @@ Sections de `face_tagger.py`, dans l'ordre :
 
 - DeepFace est importé **à la première analyse** (`load_deepface`), pas au démarrage : son import (onnxruntime, OpenCV) prend plusieurs secondes.
 - `load_deepface` fixe `DEEPFACE_HOME` (dossier de données) et `DEEPFACE_BACKEND_ENGINE` (`onnx`) **avant** l'import, sauf si l'utilisateur les a définis. Une valeur **vide** compte comme absente : avec `DEEPFACE_HOME=""`, DeepFace créait un `.deepface` relatif au dossier courant (constaté).
+- Accélération matérielle : DeepFace n'essaie par défaut que CUDA puis le processeur. `load_deepface` fixe `DEEPFACE_ONNX_PROVIDERS` (`directml,cpu` sous Windows, `coreml,cpu` sous macOS, d'après `ONNX_ACCELERATORS`) si l'onnxruntime installé propose ce fournisseur et si l'utilisateur ne l'a pas déjà défini. Logique vérifiée avec un onnxruntime simulé ; CoreML n'a **jamais été essayé sur un Mac** (RetinaFace a des tailles d'entrée variables, à surveiller), ni DirectML dans l'exécutable PyInstaller.
 - Sans `DEEPFACE_BACKEND_ENGINE`, DeepFace préférerait TensorFlow puis PyTorch s'ils sont installés : les empreintes seraient légèrement différentes.
 - L'image est passée à `represent` en tableau **BGR** déjà redressé (`exif_transpose`) : le chemin passerait par `cv2.imread`, qui échoue sur les chemins accentués sous Windows. `enforce_detection = False` : sans visage, DeepFace renvoie l'image entière avec une confiance nulle, écartée par `confidence <= 0`.
 - Le logger de DeepFace écrit des emojis sur `sys.stdout` : une console en cp1252 lève `UnicodeEncodeError` (constaté dans un programme de test). `main()` passe la console en UTF-8.

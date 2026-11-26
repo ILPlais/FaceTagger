@@ -123,6 +123,16 @@ DEFAULT_DETECTOR: str = "retinaface"
 # sur le poste, seraient choisis en priorité et donneraient des empreintes légèrement différentes.
 DEEPFACE_ENGINE: str = "onnx"
 
+# Accélération matérielle demandée à DeepFace selon le système : plateforme (sys.platform) → (fournisseur
+# d'onnxruntime qui doit être disponible, nom attendu par DEEPFACE_ONNX_PROVIDERS). Par défaut, DeepFace
+# n'essaie que CUDA puis le processeur : DirectML (Windows, GPU de n'importe quel fabricant via DirectX 12,
+# paquet onnxruntime-directml) et CoreML (macOS, GPU et Neural Engine, inclus dans onnxruntime) doivent
+# lui être demandés explicitement.
+ONNX_ACCELERATORS: dict[str, tuple[str, str]] = {
+	"win32": ("DmlExecutionProvider", "directml"),
+	"darwin": ("CoreMLExecutionProvider", "coreml"),
+}
+
 # Bornes du curseur de similarité : assez larges pour couvrir les seuils de tous les modèles ci-dessus
 THRESHOLD_MIN: float = 0.20
 THRESHOLD_MAX: float = 0.80
@@ -663,7 +673,7 @@ def decode_thumbnail(data: Optional[bytes]) -> Image.Image:
 def load_deepface(data_directory: Path) -> ModuleType:
 	"""Importe DeepFace à la première analyse et lui indique où ranger ses modèles.
 
-	DeepFace télécharge lui-même les poids de chaque réseau à sa première utilisation (quelques centaines de Mio), ici dans `<data_directory>/.deepface/weights` plutôt que dans le dossier personnel. Ses variables d'environnement doivent être fixées AVANT l'import, car il les lit à ce moment-là ; une valeur déjà définie par l'utilisateur est respectée. Sous Windows, le GPU est employé par DirectML si `onnxruntime-directml` est installé.
+	DeepFace télécharge lui-même les poids de chaque réseau à sa première utilisation (quelques centaines de Mio), ici dans `<data_directory>/.deepface/weights` plutôt que dans le dossier personnel. Ses variables d'environnement doivent être fixées AVANT l'import, car il les lit à ce moment-là ; une valeur déjà définie par l'utilisateur est respectée. L'accélération matérielle de `ONNX_ACCELERATORS` est demandée si onnxruntime la propose : DirectML sous Windows (si `onnxruntime-directml` est installé), CoreML sous macOS.
 
 	Args:
 		data_directory (Path): Dossier de données de l'application, où DeepFace crée son dossier « `.deepface` ».
@@ -679,16 +689,18 @@ def load_deepface(data_directory: Path) -> ModuleType:
 		os.environ["DEEPFACE_HOME"] = str(data_directory)
 	if not os.environ.get("DEEPFACE_BACKEND_ENGINE", "").strip():
 		os.environ["DEEPFACE_BACKEND_ENGINE"] = DEEPFACE_ENGINE
-	# Sous Windows, DeepFace ne prend DirectML (GPU de n'importe quel fabricant via DirectX 12) que si on le lui demande xplicitement : par défaut il reste sur le processeur. On ne le demande que si onnxruntime-directml est installé,sinon DeepFace signalerait un avertissement inutile. Un réglage de l'utilisateur est toujours respecté.
-	if sys.platform == "win32" and not os.environ.get("DEEPFACE_ONNX_PROVIDERS", "").strip():
+	# DeepFace ne prend DirectML (Windows) ou CoreML (macOS) que si on le lui demande explicitement : par défaut il reste sur le processeur. On ne le demande que si l'onnxruntime installé propose ce fournisseur, sinon DeepFace signalerait un avertissement inutile. Le processeur reste en dernier recours pour les opérations que l'accélérateur ne sait pas exécuter. Un réglage de l'utilisateur est toujours respecté.
+	accelerator: Optional[tuple[str, str]] = ONNX_ACCELERATORS.get(sys.platform)
+	if accelerator is not None and not os.environ.get("DEEPFACE_ONNX_PROVIDERS", "").strip():
+		provider, deepface_name = accelerator
 		try:
 			import onnxruntime
 		except ImportError:
 			# Pas d'onnxruntime du tout : l'erreur sera signalée à l'import de DeepFace, plus bas
 			pass
 		else:
-			if "DmlExecutionProvider" in onnxruntime.get_available_providers():
-				os.environ["DEEPFACE_ONNX_PROVIDERS"] = "directml,cpu"
+			if provider in onnxruntime.get_available_providers():
+				os.environ["DEEPFACE_ONNX_PROVIDERS"] = f"{deepface_name},cpu"
 	try:
 		from deepface import DeepFace
 	except ImportError as error:

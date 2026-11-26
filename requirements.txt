@@ -3,5 +3,13 @@ pillow
 pillow-heif
 numpy
 pyinstaller
-# GPU sous Windows (DirectML) : DeepFace ne l'utilise que si DEEPFACE_ONNX_PROVIDERS le demande, ce que fait load_deepface
-onnxruntime-directml; sys_platform == "win32"
+
+# Moteur onnxruntime : la meilleure variante disponible sur chaque plateforme.
+# Windows x86_64 : DirectML (GPU de n'importe quel fabricant via DirectX 12). DeepFace ne l'utilise que si
+# DEEPFACE_ONNX_PROVIDERS le demande, ce que fait load_deepface. Paquet publié uniquement pour win_amd64.
+onnxruntime-directml; sys_platform == "win32" and platform_machine == "AMD64"
+# Windows ARM64 : pas de DirectML sur PyPI, version standard (processeur).
+# macOS (Apple Silicon) : la version standard contient déjà CoreML.
+# Linux : version standard (processeur). onnxruntime-gpu (CUDA) imposerait les bibliothèques NVIDIA (plusieurs Go)
+# et alourdirait d'autant l'exécutable PyInstaller.
+onnxruntime; sys_platform != "win32" or platform_machine != "AMD64"

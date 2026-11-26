@@ -159,6 +159,22 @@ jobs:
       shell: bash
 
     # ------------------------------------------------------------------
+    # DeepFace dépend de « onnxruntime », que pip installe donc à côté de
+    # « onnxruntime-directml » : les deux paquets écrivent dans le même
+    # dossier « onnxruntime », et selon l'ordre d'installation DirectML
+    # disparaît ou les deux versions se mélangent. On les retire tous les
+    # deux, puis on réinstalle seulement DirectML (ses dépendances sont
+    # déjà présentes).
+    # ------------------------------------------------------------------
+    - name: Keep only onnxruntime-directml (Windows x86_64)
+      if: runner.os == 'Windows' && runner.arch == 'X64'
+      run: |
+        pip uninstall --yes onnxruntime onnxruntime-directml
+        pip install --no-deps onnxruntime-directml
+        python -c "import onnxruntime; providers = onnxruntime.get_available_providers(); print(providers); assert 'DmlExecutionProvider' in providers"
+      shell: bash
+
+    # ------------------------------------------------------------------
     # Le commit du tag est antérieur au commit de version.txt fait par le
     # job « version » : on réécrit donc aussi la copie de travail du runner,
     # avec le numéro calculé par ce job, pour que l'exécutable le porte.

@@ -107,15 +107,36 @@ jobs:
       shell: bash
 
   # ====================================================================
-  # Compilation sur les trois systèmes
+  # Compilation sur les trois systèmes, en x86_64 et en ARM64
+  # ====================================================================
+  # PyInstaller ne compile pas pour une autre architecture : chaque
+  # architecture a donc son propre runner. Les runners ARM de Linux et
+  # de Windows sont disponibles dans les dépôts privés depuis janvier 2026 ;
+  # macos-latest tourne déjà sur Apple Silicon (ARM64).
+  # Windows ARM64 est « expérimental » : toutes les dépendances (OpenCV
+  # notamment) n'y ont pas forcément de paquet précompilé. Son échec
+  # n'empêche pas la publication des autres archives.
   # ====================================================================
   build:
     name: Build on ${{ matrix.os }}
     needs: version
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
+      # Un système en échec n'annule pas la compilation des autres.
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            experimental: false
+          - os: ubuntu-24.04-arm
+            experimental: false
+          - os: macos-latest
+            experimental: false
+          - os: windows-latest
+            experimental: false
+          - os: windows-11-arm
+            experimental: true
 
     steps:
     # Récupère le code du tag (en lancement manuel, github.ref désigne la
@@ -143,7 +164,7 @@ jobs:
     # avec le numéro calculé par ce job, pour que l'exécutable le porte.
     # ------------------------------------------------------------------
     - name: Update version.txt from tag (Windows)
-      if: matrix.os == 'windows-latest'
+      if: runner.os == 'Windows'
       env:
         TUPLE: ${{ needs.version.outputs.tuple }}
         DOTTED: ${{ needs.version.outputs.dotted }}
@@ -172,7 +193,7 @@ jobs:
     # Compilation sous Windows (séparateur ';' et support de --version-file)
     # ------------------------------------------------------------------
     - name: Build Executable (Windows)
-      if: matrix.os == 'windows-latest'
+      if: runner.os == 'Windows'
       run: |
         pyinstaller --onefile --noconsole \
           --icon=face_tagger.ico \
@@ -189,7 +210,7 @@ jobs:
     # Note : --version-file est ignoré sur non-Windows (spécifique aux ressources PE)
     # ------------------------------------------------------------------
     - name: Build Executable (Linux / macOS)
-      if: matrix.os != 'windows-latest'
+      if: runner.os != 'Windows'
       run: |
         pyinstaller --onefile \
           --icon=face_tagger.ico \

@@ -116,6 +116,7 @@ THRESHOLD_MIN: float = 0.20
 THRESHOLD_MAX: float = 0.80
 
 THUMBNAIL_SIZE: int = 96          # Côté (en pixels) des vignettes de visages
+FACE_FRAME_WIDTH: int = 3         # Épaisseur (en pixels, écran à 100 %) du cadre coloré des vignettes de visages
 TREE_ROW_HEIGHT: int = 44         # Hauteur des lignes de la liste des personnes
 ICON_CACHE_SIZE: int = 4000       # Nombre maximal d'icônes de la liste des personnes gardées en mémoire
 TOOLTIP_DELAY: int = 500          # Délai (en millisecondes) avant l'apparition d'une infobulle, celui de Windows
@@ -168,6 +169,13 @@ SELECTION_COLORS: dict[str, dict[str, str]] = {
 		"background": DARK_COLORS["selection"],
 		"text": DARK_COLORS["selection_text"]
 	},
+}
+
+# Cadre des vignettes de visages, identique dans les deux thèmes (teintes assez soutenues pour un fond clair comme sombre) :
+# vert pour un visage déjà marqué dans la photo, bleu pour un visage seulement proposé (nom pas encore écrit)
+FACE_FRAME_COLORS: dict[str, str] = {
+	"tagged": "#2ea043",
+	"proposed": "#2f81f7",
 }
 
 # Réglages globaux : emojis et thème viennent de la ligne de commande, l'échelle de l'écran est mesurée au démarrage
@@ -1338,6 +1346,28 @@ def check_written(tags: PhotoTags, names: list[str], regions: bool, person: bool
 	return all(wanted <= found for found in present)
 
 
+def face_is_tagged(face: FaceRecord, name: Optional[str], tags: Optional[PhotoTags]) -> bool:
+	"""Indique si un visage est déjà marqué dans sa photo : une région qui le recouvre y porte déjà le nom de sa personne.
+
+	Le contrôle se fait sur les étiquettes connues de la photo (relues après chaque écriture), et non sur `FaceRecord.label`, fixé à l'analyse : un visage proposé devient ainsi « marqué » dès que la validation de sa personne a écrit son nom. Un visage dont la région porte un autre nom (visage déplacé, personne renommée) reste « proposé » : l'écriture remplacerait ce nom.
+
+	Args:
+		face (FaceRecord): Visage à contrôler.
+		name (Optional[str]): Nom de la personne à laquelle le visage est rattaché, ou `None` si elle est encore inconnue.
+		tags (Optional[PhotoTags]): Étiquettes connues de la photo du visage, ou `None` si elles n'ont pas été lues.
+
+	Returns:
+		bool: `True` si une région nommée de la photo porte ce nom (casse et espaces superflus mis à part, voir `name_key`) et recouvre le visage d'au moins `REGION_MATCH_IOU` ; toujours `False` pour une personne sans nom.
+	"""
+	if not name or tags is None:
+		return False
+	key = name_key(name)
+	return any(
+		region["name"] and name_key(region["name"]) == key and iou(face.box, region["box"]) >= REGION_MATCH_IOU
+		for region in tags.regions
+	)
+
+
 def photos_missing_name(
 		library: "Library",
 		person: Person,
@@ -1420,23 +1450,32 @@ def work_area(window: tk.Misc) -> tuple[int, int, int, int]:
 
 def thumbnail_photo(
 		data: Optional[bytes],
-		size: int = THUMBNAIL_SIZE
+		size: int = THUMBNAIL_SIZE,
+		border: Optional[str] = None
 	) -> ImageTk.PhotoImage:
 	"""Crée l'image `Tk` d'une vignette de la base, à la taille voulue agrandie selon l'échelle de l'écran.
 
 	Les vignettes restent stockées en 96 pixels : les régénérer plus grandes obligerait à ré-analyser toute la photothèque, pour un gain de netteté minime.
 
+	Le cadre éventuel est dessiné dans l'image plutôt qu'autour du widget : les thèmes natifs de `ttk` (`vista`, `aqua`) ignorent la couleur de bordure des étiquettes, et le fond du widget reste libre pour marquer la sélection.
+
 	Args:
 		data (Optional[bytes]): Vignette JPEG lue dans la base, ou `None` (un carré gris la remplace).
 		size (int): Côté voulu, en pixels, pour un écran à 100 %.
+		border (Optional[str]): Couleur du cadre (`#rrggbb`, voir `FACE_FRAME_COLORS`), ou `None` pour une vignette sans cadre.
 
 	Returns:
 		ImageTk.PhotoImage: Image prête pour un widget `Tk` ; il faut en garder une référence, sinon elle disparaît.
 	"""
 	image = decode_thumbnail(data)
 	display_size = scaled(size)
-	if image.size != (display_size, display_size):
-		image = image.resize((display_size, display_size), Image.Resampling.LANCZOS)
+	# Le cadre est pris sur le côté voulu : la vignette encadrée garde la taille prévue, et le visage reste entier (réduit, pas rogné)
+	frame = scaled(FACE_FRAME_WIDTH) if border else 0
+	inner = display_size - 2 * frame
+	if image.size != (inner, inner):
+		image = image.resize((inner, inner), Image.Resampling.LANCZOS)
+	if frame:
+		image = ImageOps.expand(image, border = frame, fill = border)
 	return ImageTk.PhotoImage(image)
 
 
@@ -2379,6 +2418,7 @@ class FaceTaggerApp(tk.Tk):
 		panes.add(right, weight = 3)
 		self.person_title: ttk.Label = ttk.Label(right, text = "", font = ("TkDefaultFont", 12, "bold"))
 		self.person_title.pack(anchor = "w", padx = 4)
+		ToolTip(self.person_title, self.person_title_tooltip)
 
 		# Navigation entre les pages : seules les vignettes de la page affichée sont chargées en mémoire
 		navigation = ttk.Frame(right)
@@ -2646,9 +2686,10 @@ class FaceTaggerApp(tk.Tk):
 					self.library = event[1]
 					self.refresh_persons()
 				elif kind == "tags":
-					# Étiquettes relues après une écriture : la colonne « Métadonnées » change
+					# Étiquettes relues après une écriture : la colonne « Métadonnées » et le cadre des vignettes changent
 					self.library.photo_tags.update(event[1])
 					self.update_person_statuses()
+					self.update_face_frames()
 				elif kind == "restored":
 					self.after_restore(event[1])
 				elif kind == "done":
@@ -3136,9 +3177,7 @@ class FaceTaggerApp(tk.Tk):
 		self.page = min(max(self.page, 0), pages - 1)
 		chunk = self.sorted_faces[self.page * size:(self.page + 1) * size]
 
-		self.person_title.configure(text = emoji(
-			f"{'🙈 ' if person.ignored else '👤 '}{person.display_name} — {total} visage{'s' if total != 1 else ''}, {len(person.photos)} photo{'s' if len(person.photos) != 1 else ''}"
-		))
+		self.update_person_title()
 		self.page_label.configure(text = f"Page {self.page + 1} / {pages}")
 		self.range_label.configure(text = f"{self.page * size + 1 if chunk else 0}–{self.page * size + len(chunk)} sur {total}")
 		for button in (self.first_button, self.previous_button):
@@ -3149,7 +3188,8 @@ class FaceTaggerApp(tk.Tk):
 		# Les vignettes de la page sont lues dans la base en une seule requête
 		thumbnails = self.database.thumbnails([face.face_id for face in chunk])
 		for face in chunk:
-			image = thumbnail_photo(thumbnails.get(face.face_id))
+			# Cadre vert : visage déjà marqué dans la photo ; cadre bleu : visage proposé, nom pas encore écrit
+			image = thumbnail_photo(thumbnails.get(face.face_id), border = self.face_frame_color(face))
 			self.face_images.append(image)
 			label = ttk.Label(
 				self.faces_frame,
@@ -3170,17 +3210,102 @@ class FaceTaggerApp(tk.Tk):
 			label.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
 			label.bind("<Button-4>", lambda event: self.canvas.yview_scroll(-1, "units"))
 			label.bind("<Button-5>", lambda event: self.canvas.yview_scroll(1, "units"))
-			# Après les liaisons ci-dessus, que l'infobulle complète sans les remplacer
-			ToolTip(
-				label,
-				photo_caption(face.photo) + "\n🖱️ Clic : sélectionner — Ctrl ou Maj + clic : sélection multiple\n"
-				"🖱️ Double-clic : ouvrir la photo — clic droit : déplacer, détacher ou écarter",
-			)
+			# Après les liaisons ci-dessus, que l'infobulle complète sans les remplacer ; son texte est calculé à
+			# l'affichage, car l'état du visage (marqué ou proposé) change après une écriture
+			ToolTip(label, lambda event, f = face: self.face_tooltip(f))
 			self.face_labels.append(label)
 			self.face_widgets[face] = label
 		self.update_face_selection()
 		self.layout_faces(force = True)
 		self.canvas.yview_moveto(0)
+
+	def update_person_title(self) -> None:
+		"""Écrit le titre de la personne affichée : nom, nombre de visages déjà marqués et proposés, nombre de photos."""
+		person = self.current_person
+		if person is None:
+			self.person_title.configure(text = "")
+			return
+		total = len(person.faces)
+		tagged = sum(1 for face in person.faces if self.face_tagged(face))
+		proposed = total - tagged
+		photos = len(person.photos)
+		self.person_title.configure(text = emoji(
+			f"{'🙈 ' if person.ignored else '👤 '}{person.display_name} — {total} visage{'s' if total != 1 else ''} "
+			f"(🟩 {tagged} marqué{'s' if tagged > 1 else ''}, 🟦 {proposed} proposé{'s' if proposed > 1 else ''}), "
+			f"{photos} photo{'s' if photos != 1 else ''}"
+		))
+
+	def person_title_tooltip(self, event: tk.Event) -> Optional[str]:
+		"""Calcule l'infobulle du titre de la personne affichée : la légende des cadres des vignettes.
+
+		Args:
+			event (tk.Event): Événement de la souris (inutilisé).
+
+		Returns:
+			Optional[str]: Légende des couleurs, ou `None` quand aucune personne n'est affichée (titre vide, ou plusieurs personnes sélectionnées).
+		"""
+		if self.current_person is None:
+			return None
+		return ("🟩 Cadre vert : visage déjà marqué, son nom figure dans une région de la photo.\n"
+			"🟦 Cadre bleu : visage proposé, son nom n'est pas encore écrit dans la photo.\n"
+			"✅ « Valider la personne » écrit son nom : ses cadres bleus deviennent verts.")
+
+	def face_tagged(self, face: FaceRecord) -> bool:
+		"""Indique si un visage de la personne affichée est déjà marqué dans sa photo (voir `face_is_tagged`).
+
+		Args:
+			face (FaceRecord): Visage de la personne affichée.
+
+		Returns:
+			bool: `True` si une région de la photo porte déjà le nom de la personne à l'emplacement du visage.
+		"""
+		name = self.current_person.name if self.current_person is not None else None
+		return face_is_tagged(face, name, self.library.photo_tags.get(face.photo))
+
+	def face_frame_color(self, face: FaceRecord) -> str:
+		"""Choisit la couleur du cadre d'une vignette.
+
+		Args:
+			face (FaceRecord): Visage de la personne affichée.
+
+		Returns:
+			str: Vert (`FACE_FRAME_COLORS["tagged"]`) pour un visage déjà marqué dans sa photo, bleu (`FACE_FRAME_COLORS["proposed"]`) pour un visage proposé.
+		"""
+		return FACE_FRAME_COLORS["tagged" if self.face_tagged(face) else "proposed"]
+
+	def face_tooltip(self, face: FaceRecord) -> str:
+		"""Calcule l'infobulle d'une vignette : photo, état du visage (marqué ou proposé) et commandes de la souris.
+
+		Args:
+			face (FaceRecord): Visage de la vignette survolée.
+
+		Returns:
+			str: Texte de l'infobulle.
+		"""
+		if self.face_tagged(face):
+			state = "🟩 Déjà marqué : son nom figure dans la photo."
+		else:
+			state = "🟦 Proposé : son nom n'est pas encore écrit dans la photo."
+		return (photo_caption(face.photo) + f"\n{state}\n🖱️ Clic : sélectionner — Ctrl ou Maj + clic : sélection multiple\n"
+			"🖱️ Double-clic : ouvrir la photo — clic droit : déplacer, détacher ou écarter")
+
+	def update_face_frames(self) -> None:
+		"""Redessine le cadre des vignettes de la page et le titre, sans reconstruire la page.
+
+		Appelée quand les étiquettes connues changent (après une écriture) : les visages dont le nom vient d'être écrit passent du bleu au vert, tandis que la sélection et la position dans la page sont conservées.
+		"""
+		if self.current_person is None or not self.face_widgets:
+			return
+		# Les vignettes de la page sont dans le cache de la base : les relire ne coûte presque rien
+		thumbnails = self.database.thumbnails([face.face_id for face in self.face_widgets])
+		images: list[ImageTk.PhotoImage] = []
+		for face, label in self.face_widgets.items():
+			image = thumbnail_photo(thumbnails.get(face.face_id), border = self.face_frame_color(face))
+			images.append(image)
+			label.configure(image = image)
+		# Les anciennes images ne sont libérées qu'une fois remplacées dans les widgets
+		self.face_images = images
+		self.update_person_title()
 
 	def layout_faces(self, force: bool = False) -> None:
 		"""Place les vignettes de la page en grille, selon la largeur de la zone.

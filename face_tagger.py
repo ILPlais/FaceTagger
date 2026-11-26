@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import functools
 import io
 import json
 import math
@@ -87,6 +88,17 @@ IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 if HEIF_AVAILABLE:
 	IMAGE_EXTENSIONS |= {".heic", ".heif"}
 
+# Extensions admises pour chaque format d'image reconnu par Pillow (d'après le contenu du fichier, voir photo_format_error).
+# Les autres formats se rabattent sur les extensions que Pillow leur associe (Image.registered_extensions).
+FORMAT_EXTENSIONS: dict[str, tuple[str, ...]] = {
+	"JPEG": (".jpg", ".jpeg", ".jpe", ".jfif"),
+	"MPO": (".jpg", ".jpeg", ".mpo"),      # JPEG à plusieurs images (appareils photo 3D, certains smartphones)
+	"PNG": (".png",),
+	"TIFF": (".tif", ".tiff"),
+	"WEBP": (".webp",),
+	"HEIF": (".heic", ".heif"),             # Format annoncé par pillow-heif
+}
+
 # Modèles de reconnaissance de DeepFace proposés, avec leur seuil de similarité cosinus par défaut. Chaque modèle
 # a sa propre échelle de ressemblance : ces seuils sont ceux de DeepFace (deepface/config/threshold.py, exprimés
 # en distance cosinus), convertis en similarité (1 − distance). Tous s'exécutent avec onnxruntime.
@@ -123,6 +135,14 @@ TOOLTIP_DELAY: int = 500          # Délai (en millisecondes) avant l'apparition
 TOOLTIP_WIDTH: int = 380          # Largeur maximale (en pixels, écran à 100 %) du texte d'une infobulle
 REGION_MATCH_IOU: float = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
 EXIFTOOL_BATCH: int = 25          # Nombre de photos modifiées par appel à ExifTool
+
+# Polices d'emojis en couleur essayées pour dessiner un emoji dans une image (voir emoji_image), avec la taille de rendu.
+# Les polices à images intégrées n'existent qu'en quelques tailles fixes : toute autre taille fait échouer leur chargement.
+EMOJI_FONTS: tuple[tuple[str, int], ...] = (
+	("seguiemj.ttf", 128),              # Windows : Segoe UI Emoji, vectorielle (toute taille convient)
+	("Apple Color Emoji.ttc", 160),     # macOS : images intégrées, 160 est l'une de leurs tailles
+	("NotoColorEmoji.ttf", 109),        # Linux : images intégrées, en une seule taille
+)
 
 # Identifiant de l'application pour la barre des tâches de Windows (voir set_windows_app_id)
 APP_USER_MODEL_ID: str = "ILPlais.FaceTagger"
@@ -172,10 +192,28 @@ SELECTION_COLORS: dict[str, dict[str, str]] = {
 }
 
 # Cadre des vignettes de visages, identique dans les deux thèmes (teintes assez soutenues pour un fond clair comme sombre) :
-# vert pour un visage déjà marqué dans la photo, bleu pour un visage seulement proposé (nom pas encore écrit)
+# vert pour un visage déjà marqué dans la photo, bleu pour un visage seulement proposé (nom pas encore écrit),
+# rouge pour un visage d'une photo en erreur (extension qui ne correspond pas au contenu, écriture refusée…)
 FACE_FRAME_COLORS: dict[str, str] = {
 	"tagged": "#2ea043",
 	"proposed": "#2f81f7",
+	"error": "#e5534b",
+}
+
+# Couleur du texte introduit par un emoji de couleur. Tk dessine les emojis en noir et blanc (sous Windows) :
+# 🟩 🟦 🟥 n'y distinguent plus rien, leur couleur est donc reportée sur le texte qu'ils introduisent (titre de la
+# personne, infobulles, journal). Mêmes teintes que le cadre des vignettes, lisibles sur fond clair comme sombre.
+EMOJI_TEXT_COLORS: dict[str, str] = {
+	"🟩": FACE_FRAME_COLORS["tagged"],
+	"🟦": FACE_FRAME_COLORS["proposed"],
+	"🟥": FACE_FRAME_COLORS["error"],
+}
+
+# Opacité (de 0, invisible, à 1, opaque) du badge 💾 des visages déjà enregistrés, dans l'aperçu d'une photo (voir saved_badge) :
+# assez transparent pour laisser voir le visage en dessous, le fond l'étant plus que la disquette pour qu'elle reste lisible
+SAVED_BADGE_OPACITY: dict[str, float] = {
+	"background": 0.35,
+	"icon": 0.50,
 }
 
 # Réglages globaux : emojis et thème viennent de la ligne de commande, l'échelle de l'écran est mesurée au démarrage
@@ -422,6 +460,37 @@ def list_photos(directory: str) -> list[str]:
 	return photos
 
 
+def photo_format_error(photo: str) -> Optional[str]:
+	"""Vérifie que l'extension d'une photo correspond à son contenu (une image PNG nommée `*.jpg`, par exemple).
+
+	Pillow reconnaît le format d'après les premiers octets du fichier, sans tenir compte de son nom : une photo mal nommée s'analyse donc normalement. ExifTool, lui, refuse d'écrire dans un fichier dont l'extension ne correspond pas au contenu (« Not a valid JPG (looks more like a PNG) ») : mieux vaut le signaler avant l'écriture. Seul l'en-tête est lu : la vérification est rapide.
+
+	Args:
+		photo (str): Chemin de la photo.
+
+	Returns:
+		Optional[str]: Description de l'erreur, ou `None` si l'extension convient (ou si le format n'est pas reconnu par Pillow : l'analyse l'aura déjà signalé).
+	"""
+	try:
+		with Image.open(photo) as image:
+			image_format = (image.format or "").upper()
+	except Exception:
+		return None
+	if not image_format:
+		return None
+	extension = Path(photo).suffix.lower()
+	expected = FORMAT_EXTENSIONS.get(image_format) or tuple(sorted(
+		suffix for suffix, name in Image.registered_extensions().items() if name.upper() == image_format
+	))
+	if not expected or extension in expected:
+		return None
+	return (
+		f"Extension « {extension or '(aucune)'} » incorrecte : ce fichier est en réalité une image {image_format}. "
+		f"Renommez-le en « {Path(photo).stem}{expected[0]} » : ExifTool refuse d'écrire les noms dans un fichier "
+		"dont l'extension ne correspond pas au contenu."
+	)
+
+
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 	"""Charge une police lisible pour annoter les photos.
 
@@ -439,6 +508,108 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 		except OSError:
 			continue
 	return ImageFont.load_default()
+
+
+@functools.lru_cache(maxsize = 8)
+def emoji_image(character: str) -> Optional[Image.Image]:
+	"""Dessine un emoji en couleur avec la première police d'emojis du système trouvée (voir `EMOJI_FONTS`).
+
+	Sert à poser un emoji sur une photo : Pillow le dessine avec les couleurs de la police (`embedded_color`). Le résultat est gardé en cache : chaque emoji n'est dessiné qu'une fois, puis seulement réduit.
+
+	Args:
+		character (str): Emoji à dessiner (« 💾 »…).
+
+	Returns:
+		Optional[Image.Image]: Emoji en RGBA sur fond transparent, carré, à la taille de rendu de la police (une centaine de pixels) ; `None` si aucune police d'emojis n'a pu être chargée.
+	"""
+	for font_name, size in EMOJI_FONTS:
+		try:
+			font = ImageFont.truetype(font_name, size)
+		except OSError:
+			# Police absente de ce système, ou taille non disponible
+			continue
+		# Toile deux fois plus grande que la police : certains emojis débordent de leur boîte nominale
+		canvas = Image.new("RGBA", (size * 2, size * 2), (0, 0, 0, 0))
+		try:
+			ImageDraw.Draw(canvas).text((size // 2, size // 2), character, font = font, embedded_color = True)
+		except (OSError, ValueError):
+			continue
+		box = canvas.getbbox()
+		if box is None:
+			continue
+		# Recadré sur le dessin puis centré dans un carré, pour être réduit sans déformation
+		glyph = canvas.crop(box)
+		side = max(glyph.size)
+		square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+		square.paste(glyph, ((side - glyph.width) // 2, (side - glyph.height) // 2))
+		return square
+	return None
+
+
+def floppy_pictogram(size: int) -> Image.Image:
+	"""Dessine une disquette simplifiée, qui remplace l'emoji 💾 sans police d'emojis ou avec l'option `--no-emoji`.
+
+	Le dessin est fait quatre fois plus grand puis réduit : ses bords sont ainsi lissés.
+
+	Args:
+		size (int): Côté de l'icône, en pixels.
+
+	Returns:
+		Image.Image: Disquette en RGBA sur fond transparent.
+	"""
+	big = size * 4
+	image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+	draw = ImageDraw.Draw(image)
+	margin = big // 16
+	# Corps de la disquette, volet métallique (avec sa fenêtre) en haut, étiquette blanche en bas
+	draw.rounded_rectangle([margin, margin, big - margin, big - margin], radius = big // 10, fill = "#3a4a5c")
+	draw.rectangle([big * 0.28, margin, big * 0.72, big * 0.38], fill = "#d0d4d8")
+	draw.rectangle([big * 0.56, big * 0.12, big * 0.66, big * 0.32], fill = "#3a4a5c")
+	draw.rectangle([big * 0.2, big * 0.52, big * 0.8, big - margin * 2], fill = "#ffffff")
+	return image.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def saved_icon(size: int) -> Image.Image:
+	"""Fournit l'icône 💾 qui marque, dans l'aperçu d'une photo, un visage déjà enregistré dans ses métadonnées.
+
+	L'emoji est dessiné avec la police d'emojis du système ; sans elle, ou avec l'option `--no-emoji`, une disquette simplifiée le remplace.
+
+	Args:
+		size (int): Côté de l'icône, en pixels.
+
+	Returns:
+		Image.Image: Icône carrée en RGBA, à coller avec son canal alpha comme masque.
+	"""
+	icon = emoji_image("💾") if SETTINGS["emoji"] else None
+	if icon is None:
+		return floppy_pictogram(size)
+	return icon.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def saved_badge(size: int, padding: int) -> Image.Image:
+	"""Compose le badge translucide 💾 posé sur les visages déjà enregistrés, dans l'aperçu d'une photo.
+
+	Le badge (fond blanc arrondi et disquette) est rendu translucide selon `SAVED_BADGE_OPACITY` : le visage reste visible en dessous. Le fond est plus transparent que la disquette, pour la détacher d'une photo sombre sans masquer le visage.
+
+	Args:
+		size (int): Côté de la disquette, en pixels.
+		padding (int): Marge entre la disquette et le bord du fond, en pixels.
+
+	Returns:
+		Image.Image: Badge carré en RGBA, de côté `size + 2 * padding`, à coller avec son canal alpha comme masque.
+	"""
+	side = size + 2 * padding
+	badge = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+	ImageDraw.Draw(badge).rounded_rectangle(
+		[0, 0, side - 1, side - 1],
+		radius = 2 * padding,
+		fill = (255, 255, 255, round(255 * SAVED_BADGE_OPACITY["background"]))
+	)
+	icon = saved_icon(size)
+	# L'opacité de la disquette s'applique à son propre canal alpha : ses bords lissés restent progressifs
+	icon.putalpha(icon.getchannel("A").point(lambda alpha: round(alpha * SAVED_BADGE_OPACITY["icon"])))
+	badge.alpha_composite(icon, (padding, padding))
+	return badge
 
 
 def make_thumbnail(
@@ -1006,6 +1177,7 @@ class Library:
 		faces (list[FaceRecord]): Tous les visages détectés, y compris ceux écartés.
 		persons (dict[int, Person]): Personnes, par identifiant.
 		photo_tags (dict[str, PhotoTags]): Étiquettes déjà présentes dans chaque photo, par chemin.
+		photo_errors (dict[str, str]): Description de l'erreur de chaque photo en erreur (extension incorrecte, écriture refusée par ExifTool), par chemin.
 		_next_id (int): Prochain identifiant de personne à attribuer.
 	"""
 
@@ -1014,6 +1186,7 @@ class Library:
 		self.faces: list[FaceRecord] = []
 		self.persons: dict[int, Person] = {}
 		self.photo_tags: dict[str, PhotoTags] = {}     # Étiquettes existantes, par photo
+		self.photo_errors: dict[str, str] = {}         # Photos en erreur : cadre rouge et message dans l'aperçu
 		self._next_id: int = 1
 
 	# ---------- Association avec les étiquettes existantes ----------
@@ -1752,17 +1925,22 @@ class ToolTip:
 		# Ligne par ligne : avec --no-emoji, emoji() retire l'emoji de tête mais aussi l'espace qui le suit. Le
 		# sélecteur de variante U+FE0F qui suit certains emojis (🏷️, 🖼️, 🖱️…) est dessiné par Tk comme un large
 		# blanc (vérifié sous Windows) : sans lui, l'emoji s'affiche à l'identique.
-		text = "\n".join(emoji(line) for line in self.current.split("\n")).replace("️", "")
-		tk.Label(
-			window, text = text,
-			justify = "left",
-			wraplength = scaled(TOOLTIP_WIDTH),
-			font = "TkTooltipFont",
-			background = colors["background"],
-			foreground = colors["text"],
-			padx = scaled(6),
-			pady = scaled(4),
-		).pack(padx = 1, pady = 1)      # Le fond de la fenêtre, visible sur un pixel, dessine la bordure
+		# Une étiquette par ligne : une ligne qui commence par 🟩, 🟦 ou 🟥 prend la couleur de son emoji, que Tk
+		# dessine en noir et blanc (voir EMOJI_TEXT_COLORS). La couleur est lue avant emoji(), qui retire l'emoji.
+		body = tk.Frame(window, background = colors["background"], padx = scaled(6), pady = scaled(4))
+		body.pack(padx = 1, pady = 1)   # Le fond de la fenêtre, visible sur un pixel, dessine la bordure
+		for line in self.current.split("\n"):
+			tk.Label(
+				body, text = emoji(line).replace("️", ""),
+				justify = "left",
+				anchor = "w",
+				wraplength = scaled(TOOLTIP_WIDTH),
+				font = "TkTooltipFont",
+				background = colors["background"],
+				foreground = line_color(line) or colors["text"],
+				padx = 0,
+				pady = 0,
+			).pack(anchor = "w")
 		window.update_idletasks()
 		width, height = window.winfo_reqwidth(), window.winfo_reqheight()
 		pointer_x, pointer_y = self.position
@@ -1778,6 +1956,107 @@ class ToolTip:
 		window.wm_geometry(f"+{x}+{y}")
 		window.deiconify()
 		self.window = window
+
+
+def line_color(line: str) -> Optional[str]:
+	"""Donne la couleur d'une ligne de texte qui commence par un emoji de couleur (voir `EMOJI_TEXT_COLORS`).
+
+	À appeler avant `emoji()` : avec `--no-emoji`, l'emoji est retiré, mais la couleur du texte garde son sens.
+
+	Args:
+		line (str): Ligne de texte, avec ses emojis.
+
+	Returns:
+		Optional[str]: Couleur (`#rrggbb`) de l'emoji qui ouvre la ligne, ou `None` pour la couleur habituelle du texte.
+	"""
+	return EMOJI_TEXT_COLORS.get(line.lstrip()[:1])
+
+
+def colored_segments(text: str) -> list[tuple[str, Optional[str]]]:
+	"""Découpe une ligne en morceaux, chacun avec la couleur de l'emoji de couleur qui l'introduit.
+
+	Un morceau coloré va de son emoji (🟩, 🟦, 🟥) jusqu'à la virgule, la parenthèse fermante ou l'emoji de couleur suivant, exclus : dans « (🟩 2 marqués, 🟦 3 proposés) », seuls « 🟩 2 marqués » et « 🟦 3 proposés » sont colorés.
+
+	Args:
+		text (str): Ligne de texte, avec ses emojis.
+
+	Returns:
+		list[tuple[str, Optional[str]]]: Morceaux dans l'ordre, avec leur couleur (`#rrggbb`) ou `None` pour la couleur habituelle du texte. Mis bout à bout, ils redonnent le texte.
+	"""
+	colors = "".join(EMOJI_TEXT_COLORS)
+	segments: list[tuple[str, Optional[str]]] = []
+	for match in re.finditer(f"([{colors}][^,){colors}]*)|([^{colors}]+)", text):
+		segments.append((match.group(0), EMOJI_TEXT_COLORS[match.group(0)[0]] if match.group(1) else None))
+	return segments
+
+
+def strip_segment_emoji(text: str) -> str:
+	"""Adapte un morceau de texte à l'option `--no-emoji`, sans retirer les blancs qui le séparent de ses voisins.
+
+	`emoji()` retire aussi les blancs aux extrémités : sur un morceau de ligne (« , » entre deux morceaux colorés), les mots se colleraient. Ici, seul le blanc qui suit chaque emoji retiré disparaît.
+
+	Args:
+		text (str): Morceau de texte, avec ses emojis.
+
+	Returns:
+		str: Le texte tel quel ou, avec `--no-emoji`, sans ses emojis ni le blanc qui suit chacun.
+	"""
+	if SETTINGS["emoji"]:
+		return text
+	return re.sub(f"(?:{EMOJI_PATTERN.pattern})+ ?", "", text)
+
+
+class ColoredLabel(ttk.Frame):
+	"""Étiquette d'une ligne dont les morceaux introduits par 🟩, 🟦 ou 🟥 prennent la couleur de leur emoji.
+
+	Tk dessine les emojis en noir et blanc : la couleur passe donc sur le texte. Un `ttk.Label` n'a qu'une couleur de texte : la ligne est composée d'une étiquette par morceau (voir `colored_segments`), placées côte à côte.
+
+	Attributes:
+		font (str | tuple): Police des morceaux.
+		tooltip (Optional[Callable[[tk.Event], Optional[str]]]): Fonction qui calcule l'infobulle, attachée à chaque morceau, ou `None`.
+		text (str): Texte affiché, avec ses emojis.
+		parts (list[ttk.Label]): Étiquettes des morceaux affichés.
+	"""
+
+	def __init__(
+			self,
+			master: tk.Misc,
+			font: str | tuple,
+			tooltip: Optional[Callable[[tk.Event], Optional[str]]] = None
+		) -> None:
+		"""Crée une étiquette vide.
+
+		Args:
+			master (tk.Misc): Widget parent.
+			font (str | tuple): Police des morceaux.
+			tooltip (Optional[Callable[[tk.Event], Optional[str]]]): Fonction qui calcule l'infobulle, ou `None`. Elle est attachée à chaque morceau : la souris au-dessus d'un morceau a quitté le cadre, qui ne recevrait plus ses mouvements.
+		"""
+		super().__init__(master)
+		self.font: str | tuple = font
+		self.tooltip: Optional[Callable[[tk.Event], Optional[str]]] = tooltip
+		self.text: str = ""
+		self.parts: list[ttk.Label] = []
+
+	def set_text(self, text: str) -> None:
+		"""Remplace le texte affiché ; les morceaux ne sont recréés que si le texte change.
+
+		Args:
+			text (str): Nouveau texte, avec ses emojis (retirés à l'affichage avec `--no-emoji`).
+		"""
+		if text == self.text:
+			return
+		self.text = text
+		for part in self.parts:
+			part.destroy()
+		self.parts.clear()
+		for segment, color in colored_segments(text):
+			part = ttk.Label(self, text = strip_segment_emoji(segment), font = self.font)
+			if color:
+				part.configure(foreground = color)
+			part.pack(side = "left")
+			if self.tooltip is not None:
+				ToolTip(part, self.tooltip)
+			self.parts.append(part)
 
 
 def photo_caption(photo: str) -> str:
@@ -1862,7 +2141,7 @@ class NameDialog(tk.Toplevel):
 
 
 class PhotoViewer(tk.Toplevel):
-	"""Fenêtre qui affiche une photo entière, avec le cadre et le nom de chaque visage.
+	"""Fenêtre qui affiche une photo entière, avec le cadre et le nom de chaque visage, et 💾 sur ceux déjà enregistrés dans ses métadonnées. L'erreur éventuelle de la photo (extension incorrecte…) est décrite au-dessus.
 
 	Attributes:
 		photo_image (ImageTk.PhotoImage): Photo annotée affichée (référence conservée pour qu'elle reste visible).
@@ -1878,9 +2157,13 @@ class PhotoViewer(tk.Toplevel):
 
 		La photo est réduite pour tenir dans la zone utile de l'écran. Si elle ne peut pas être ouverte, un message d'erreur s'affiche et la fenêtre se referme aussitôt.
 
+		Un visage déjà enregistré (son nom figure dans une région de la photo, voir `face_is_tagged`) porte une disquette 💾 dans le coin supérieur droit de son cadre, dont la couleur reste réservée au visage sélectionné ; une légende s'affiche alors sous la photo.
+
+		Si la photo est en erreur (`Library.photo_errors`), la description de l'erreur s'affiche en rouge au-dessus d'elle.
+
 		Args:
 			master (tk.Misc): Fenêtre parente.
-			library (Library): Photothèque, qui fournit les visages de la photo et le nom de leur personne.
+			library (Library): Photothèque, qui fournit les visages de la photo, le nom de leur personne et les erreurs des photos.
 			face (FaceRecord): Visage dont on ouvre la photo, encadré en rouge (les autres le sont en vert).
 		"""
 		super().__init__(master)
@@ -1897,20 +2180,50 @@ class PhotoViewer(tk.Toplevel):
 		image.thumbnail((min(scaled(1100), area_width - scaled(40)), min(scaled(780), area_height - scaled(80))))
 		draw = ImageDraw.Draw(image)
 		font = load_font(max(scaled(12), image.width // 55))
+		frame = scaled(3)
+		tags = library.photo_tags.get(face.photo)
+		saved = 0
 		for other in library.faces_of_photo(face.photo):
 			x, y, width, height = other.box
 			left, top = x * image.width, y * image.height
 			right, bottom = (x + width) * image.width, (y + height) * image.height
 			# Rouge pour le visage sélectionné, vert pour les autres
 			color = "#ff3b30" if other is face else "#34c759"
-			draw.rectangle([left, top, right, bottom], outline = color, width = scaled(3))
+			draw.rectangle([left, top, right, bottom], outline = color, width = frame)
 			# Le nom est écrit sur un fond plein pour rester lisible sur les images chargées
 			caption = other.person.display_name if other.person else "?"
 			text_box = draw.textbbox((left, bottom + 2), caption, font = font)
 			draw.rectangle(text_box, fill = color)
 			draw.text((left, bottom + 2), caption, fill = "white", font = font)
+			if face_is_tagged(other, other.person.name if other.person else None, tags):
+				# Visage déjà enregistré dans les métadonnées : 💾 dans le coin supérieur droit, à l'intérieur du cadre,
+				# car la couleur du cadre désigne déjà le visage sélectionné. Taille proportionnelle au visage, mais bornée.
+				saved += 1
+				side = round(min(max(scaled(16), (right - left) * 0.22), scaled(32)))
+				padding = scaled(2)
+				badge_left = max(0, round(right) - frame - side - 2 * padding)
+				badge_top = round(top) + frame
+				# Badge translucide (fond blanc arrondi et disquette) : le visage reste visible en dessous.
+				# Collé avec son canal alpha comme masque, le badge est mélangé à la photo selon son opacité
+				badge = saved_badge(side, padding)
+				image.paste(badge, (badge_left, badge_top), badge)
 		self.photo_image: ImageTk.PhotoImage = ImageTk.PhotoImage(image)
+		error = library.photo_errors.get(face.photo)
+		if error:
+			# Description de l'erreur au-dessus de la photo, en rouge comme le cadre de ses vignettes : c'est la première
+			# chose à voir, puisque les noms ne peuvent pas être écrits dans cette photo tant qu'elle n'est pas corrigée
+			ttk.Label(
+				self,
+				text = emoji(f"🟥 Photo en erreur : {error}"),
+				foreground = FACE_FRAME_COLORS["error"],
+				wraplength = image.width - scaled(8),
+				justify = "left",
+				padding = 4,
+			).pack(anchor = "w", fill = "x")
 		ttk.Label(self, image = self.photo_image).pack()
+		if saved:
+			# Légende de l'icône, seulement quand elle apparaît sur la photo
+			ttk.Label(self, text = emoji("💾 Disquette : visage déjà enregistré dans les métadonnées de la photo."), padding = 4).pack(anchor = "w")
 		self.bind("<Escape>", lambda event: self.destroy())
 		set_title_bar_theme(self)
 
@@ -2120,7 +2433,7 @@ class FaceTaggerApp(tk.Tk):
 		regroup_button (ttk.Button): Bouton « Regrouper à nouveau ».
 		tree (ttk.Treeview): Liste des personnes.
 		heading_tips (dict[str, str]): Infobulle de chaque en-tête de la liste, par identifiant de colonne.
-		person_title (ttk.Label): Titre de la personne affichée.
+		person_title (ColoredLabel): Titre de la personne affichée, coloré comme les cadres des vignettes.
 		first_button (ttk.Button): Bouton de la première page.
 		previous_button (ttk.Button): Bouton de la page précédente.
 		page_label (ttk.Label): Numéro de la page affichée et nombre de pages.
@@ -2416,9 +2729,9 @@ class FaceTaggerApp(tk.Tk):
 
 		right = ttk.Frame(panes)
 		panes.add(right, weight = 3)
-		self.person_title: ttk.Label = ttk.Label(right, text = "", font = ("TkDefaultFont", 12, "bold"))
+		# Morceaux colorés (🟩 marqués, 🟦 proposés, 🟥 en erreur), l'infobulle (légende des cadres) sur chacun
+		self.person_title: ColoredLabel = ColoredLabel(right, font = ("TkDefaultFont", 12, "bold"), tooltip = self.person_title_tooltip)
 		self.person_title.pack(anchor = "w", padx = 4)
-		ToolTip(self.person_title, self.person_title_tooltip)
 
 		# Navigation entre les pages : seules les vignettes de la page affichée sont chargées en mémoire
 		navigation = ttk.Frame(right)
@@ -2646,10 +2959,14 @@ class FaceTaggerApp(tk.Tk):
 		Args:
 			message (str): Message à afficher (ses emojis sont retirés avec `--no-emoji`).
 		"""
+		# Couleur lue avant emoji(), qui retire l'emoji : Tk dessine 🟩 🟦 🟥 en noir et blanc, le texte prend leur couleur
+		color = line_color(message)
 		message = emoji(message)
 		print(message, flush = True)
 		self.log_text.configure(state = "normal")
-		self.log_text.insert("end", message + "\n")
+		if color:
+			self.log_text.tag_configure(color, foreground = color)     # Une étiquette Tk par couleur, nommée d'après elle
+		self.log_text.insert("end", message + "\n", (color,) if color else ())
 		self.log_text.see("end")
 		self.log_text.configure(state = "disabled")
 
@@ -2669,6 +2986,7 @@ class FaceTaggerApp(tk.Tk):
 		- (« `progress` », fait, total, texte) : met à jour la barre de progression et la barre d'état ;
 		- (« `library` », photothèque) : remplace la photothèque et reconstruit la liste des personnes ;
 		- (« `tags` », `{photo: PhotoTags}`) : étiquettes relues après une écriture ;
+		- (« `errors` », `{photo: Optional[str]}`) : erreurs constatées pendant une écriture (`None` : l'erreur a disparu) ;
 		- (« `restored` », photos) : photos restaurées depuis leur sauvegarde ;
 		- (« `done` »,) : fin du travail, les boutons sont réactivés.
 		"""
@@ -2689,6 +3007,14 @@ class FaceTaggerApp(tk.Tk):
 					# Étiquettes relues après une écriture : la colonne « Métadonnées » et le cadre des vignettes changent
 					self.library.photo_tags.update(event[1])
 					self.update_person_statuses()
+					self.update_face_frames()
+				elif kind == "errors":
+					# Erreurs constatées (ou disparues) pendant une écriture : le cadre des vignettes change
+					for photo, error in event[1].items():
+						if error:
+							self.library.photo_errors[photo] = error
+						else:
+							self.library.photo_errors.pop(photo, None)
 					self.update_face_frames()
 				elif kind == "restored":
 					self.after_restore(event[1])
@@ -2904,6 +3230,21 @@ class FaceTaggerApp(tk.Tk):
 				))
 			self.post("log", f"✅ {len(library.faces)} visage{'s' if len(library.faces) != 1 else ''} au total.")
 
+			# Contrôle du format des photos qui ont des visages (les seules affichées) : une extension qui ne
+			# correspond pas au contenu ne gêne pas l'analyse, mais ExifTool refuserait d'y écrire les noms.
+			# Refait à chaque analyse (seul l'en-tête est lu), car un fichier peut être remplacé sans changer de nom.
+			photos_with_faces = sorted({face.photo for face in library.faces})
+			for index, photo in enumerate(photos_with_faces, start = 1):
+				if index % 100 == 0 or index == len(photos_with_faces):
+					self.post("progress", index, len(photos_with_faces), f"🧪 Contrôle des fichiers {index}/{len(photos_with_faces)}…")
+				error = photo_format_error(photo)
+				if error:
+					library.photo_errors[photo] = error
+					self.post("log", f"🟥 {os.path.basename(photo)} : {error}")
+			if library.photo_errors:
+				count = len(library.photo_errors)
+				self.post("log", f"⚠️ {count} photo{'s' if count != 1 else ''} en erreur (cadre rouge) : {'leurs' if count != 1 else 'ses'} noms ne seront pas écrits tant que l'erreur demeure.")
+
 			# Étiquettes déjà présentes : d'abord depuis la base, ExifTool ne lit que les photos manquantes
 			if self.exiftool.available and library.faces:
 				with_faces = sorted({face.photo for face in library.faces})
@@ -3105,7 +3446,7 @@ class FaceTaggerApp(tk.Tk):
 		# La page courante est conservée tant que la personne affichée ne change pas
 		self.show_person(selected[0] if len(selected) == 1 else None, keep_page = True)
 		if len(selected) > 1:
-			self.person_title.configure(text = emoji(f"👥 {len(selected)} personnes sélectionnées"))
+			self.person_title.set_text(f"👥 {len(selected)} personnes sélectionnées")
 		self.update_action_states()
 
 	def page_size(self) -> int:
@@ -3163,7 +3504,7 @@ class FaceTaggerApp(tk.Tk):
 		self.face_widgets.clear()
 		person = self.current_person
 		if person is None:
-			self.person_title.configure(text = "")
+			self.person_title.set_text("")
 			self.page_label.configure(text = "Page – / –")
 			self.range_label.configure(text = "")
 			for button in (self.first_button, self.previous_button, self.next_button, self.last_button):
@@ -3188,7 +3529,8 @@ class FaceTaggerApp(tk.Tk):
 		# Les vignettes de la page sont lues dans la base en une seule requête
 		thumbnails = self.database.thumbnails([face.face_id for face in chunk])
 		for face in chunk:
-			# Cadre vert : visage déjà marqué dans la photo ; cadre bleu : visage proposé, nom pas encore écrit
+			# Cadre vert : visage déjà marqué dans la photo ; cadre bleu : visage proposé, nom pas encore écrit ;
+			# cadre rouge : photo en erreur (extension incorrecte…), nom impossible à écrire
 			image = thumbnail_photo(thumbnails.get(face.face_id), border = self.face_frame_color(face))
 			self.face_images.append(image)
 			label = ttk.Label(
@@ -3220,18 +3562,21 @@ class FaceTaggerApp(tk.Tk):
 		self.canvas.yview_moveto(0)
 
 	def update_person_title(self) -> None:
-		"""Écrit le titre de la personne affichée : nom, nombre de visages déjà marqués et proposés, nombre de photos."""
+		"""Écrit le titre de la personne affichée : nom, nombre de visages déjà marqués, proposés et en erreur, nombre de photos."""
 		person = self.current_person
 		if person is None:
-			self.person_title.configure(text = "")
+			self.person_title.set_text("")
 			return
 		total = len(person.faces)
-		tagged = sum(1 for face in person.faces if self.face_tagged(face))
-		proposed = total - tagged
+		# Les visages des photos en erreur sont comptés à part : leur cadre est rouge, quel que soit leur état
+		errors = sum(1 for face in person.faces if face.photo in self.library.photo_errors)
+		tagged = sum(1 for face in person.faces if face.photo not in self.library.photo_errors and self.face_tagged(face))
+		proposed = total - tagged - errors
 		photos = len(person.photos)
-		self.person_title.configure(text = emoji(
+		error_text = f", 🟥 {errors} en erreur" if errors else ""
+		self.person_title.set_text((
 			f"{'🙈 ' if person.ignored else '👤 '}{person.display_name} — {total} visage{'s' if total != 1 else ''} "
-			f"(🟩 {tagged} marqué{'s' if tagged > 1 else ''}, 🟦 {proposed} proposé{'s' if proposed > 1 else ''}), "
+			f"(🟩 {tagged} marqué{'s' if tagged > 1 else ''}, 🟦 {proposed} proposé{'s' if proposed > 1 else ''}{error_text}), "
 			f"{photos} photo{'s' if photos != 1 else ''}"
 		))
 
@@ -3248,7 +3593,8 @@ class FaceTaggerApp(tk.Tk):
 			return None
 		return ("🟩 Cadre vert : visage déjà marqué, son nom figure dans une région de la photo.\n"
 			"🟦 Cadre bleu : visage proposé, son nom n'est pas encore écrit dans la photo.\n"
-			"✅ « Valider la personne » écrit son nom : ses cadres bleus deviennent verts.")
+			"✅ « Valider la personne » écrit son nom : ses cadres bleus deviennent verts.\n"
+			"🟥 Cadre rouge : photo en erreur (extension qui ne correspond pas au contenu…), son nom ne peut pas y être écrit ; double-clic pour le détail.")
 
 	def face_tagged(self, face: FaceRecord) -> bool:
 		"""Indique si un visage de la personne affichée est déjà marqué dans sa photo (voir `face_is_tagged`).
@@ -3269,12 +3615,15 @@ class FaceTaggerApp(tk.Tk):
 			face (FaceRecord): Visage de la personne affichée.
 
 		Returns:
-			str: Vert (`FACE_FRAME_COLORS["tagged"]`) pour un visage déjà marqué dans sa photo, bleu (`FACE_FRAME_COLORS["proposed"]`) pour un visage proposé.
+			str: Rouge (`FACE_FRAME_COLORS["error"]`) pour un visage d'une photo en erreur, sinon vert (`FACE_FRAME_COLORS["tagged"]`) pour un visage déjà marqué dans sa photo, bleu (`FACE_FRAME_COLORS["proposed"]`) pour un visage proposé.
 		"""
+		# L'erreur passe avant tout : tant qu'elle demeure, le nom ne peut pas être écrit dans la photo
+		if face.photo in self.library.photo_errors:
+			return FACE_FRAME_COLORS["error"]
 		return FACE_FRAME_COLORS["tagged" if self.face_tagged(face) else "proposed"]
 
 	def face_tooltip(self, face: FaceRecord) -> str:
-		"""Calcule l'infobulle d'une vignette : photo, état du visage (marqué ou proposé) et commandes de la souris.
+		"""Calcule l'infobulle d'une vignette : photo, état du visage (marqué, proposé ou en erreur) et commandes de la souris.
 
 		Args:
 			face (FaceRecord): Visage de la vignette survolée.
@@ -3282,7 +3631,10 @@ class FaceTaggerApp(tk.Tk):
 		Returns:
 			str: Texte de l'infobulle.
 		"""
-		if self.face_tagged(face):
+		error = self.library.photo_errors.get(face.photo)
+		if error:
+			state = f"🟥 Photo en erreur : {error}"
+		elif self.face_tagged(face):
 			state = "🟩 Déjà marqué : son nom figure dans la photo."
 		else:
 			state = "🟦 Proposé : son nom n'est pas encore écrit dans la photo."
@@ -3703,7 +4055,7 @@ class FaceTaggerApp(tk.Tk):
 		) -> None:
 		"""Écrit les métadonnées par lots de `EXIFTOOL_BATCH` photos (exécuté hors du thread Tk).
 
-		Après chaque lot, les photos sont relues pour vérifier l'écriture, puis la base est mise à jour (signature, étiquettes, historique) et les étiquettes relues sont envoyées à l'interface (événement « `tags` »). Les erreurs sont écrites dans le journal, et l'événement « `done` » est envoyé dans tous les cas.
+		Les photos dont l'extension ne correspond pas au contenu sont écartées (ExifTool les refuserait) et signalées à l'interface (événement « `errors` », comme les refus d'ExifTool). Après chaque lot, les photos sont relues pour vérifier l'écriture, puis la base est mise à jour (signature, étiquettes, historique) et les étiquettes relues sont envoyées à l'interface (événement « `tags` »). Les erreurs sont écrites dans le journal, et l'événement « `done` » est envoyé dans tous les cas.
 
 		Args:
 			updates (dict[str, list[tuple[str, FaceRecord]]]): Couples (nom, visage) à écrire, par chemin de photo.
@@ -3718,6 +4070,17 @@ class FaceTaggerApp(tk.Tk):
 				f"💾 Écriture des métadonnées de {len(photos)} photo{'s' if len(photos) != 1 else ''}…"
 			)
 			problems = verified_count = backups_count = 0
+			total = len(photos)
+			# Format vérifié de nouveau juste avant l'écriture : ExifTool refuse d'écrire dans une photo dont l'extension
+			# ne correspond pas au contenu, inutile de la lui confier. L'événement efface aussi les erreurs disparues
+			# (`None`) : une photo qui avait échoué lors d'une écriture précédente est ainsi retentée.
+			format_errors: dict[str, Optional[str]] = {photo: photo_format_error(photo) for photo in photos}
+			self.post("errors", format_errors)
+			for photo, error in format_errors.items():
+				if error:
+					problems += 1
+					self.post("log", f"🟥 {os.path.basename(photo)} non modifiée : {error}")
+			photos = [photo for photo in photos if not format_errors[photo]]
 			for start in range(0, len(photos), EXIFTOOL_BATCH):
 				if self.cancel_event.is_set():
 					self.post("log", "⏹️ Écriture interrompue.")
@@ -3764,12 +4127,21 @@ class FaceTaggerApp(tk.Tk):
 					records.append(record)
 
 				# 2. Écriture par ExifTool (la 1re version de chaque photo est conservée dans *_original)
+				# Les erreurs d'ExifTool se terminent par « - <photo> » (chemin tel qu'il lui a été transmis) : elles
+				# permettent d'encadrer en rouge les vignettes de la photo refusée et d'en afficher la cause dans l'aperçu.
+				by_key: dict[str, str] = {path_key(Path(photo).as_posix()): photo for photo in batch}
+				write_errors: dict[str, Optional[str]] = {}
 				for message in self.exiftool.write_tags(records, backup):
 					if "updated" in message or "unchanged" in message:
 						self.post("log", f"✅ {message}")
 					else:
 						problems += 1
 						self.post("log", f"⚠️ {message}")
+						if message.startswith("Error") and " - " in message:
+							cause, source = message.rsplit(" - ", 1)
+							photo = by_key.get(path_key(source.strip()))
+							if photo is not None:
+								write_errors[photo] = f"ExifTool a refusé l'écriture : {cause.removeprefix('Error:').strip()}."
 
 				# 3. Relecture : vérification des noms, puis mise à jour de la base
 				entries = self.exiftool.read_tags(batch)
@@ -3786,6 +4158,7 @@ class FaceTaggerApp(tk.Tk):
 					if check_written(tags, names, write_regions, write_person, write_keywords):
 						verified = True
 						verified_count += 1
+						write_errors[photo] = None      # Noms bien écrits : la photo n'est plus en erreur
 					else:
 						verified = False
 						problems += 1
@@ -3814,16 +4187,18 @@ class FaceTaggerApp(tk.Tk):
 					new_tags[photo] = tags
 				self.database.store_tags(fresh)
 				self.post("tags", new_tags)
+				if write_errors:
+					self.post("errors", write_errors)
 
 			self.post(
 				"progress",
-				len(photos),
-				len(photos),
+				total,
+				total,
 				f"✅ Écriture terminée ({problems} avertissement{'s' if problems != 1 else ''})."
 			)
 			self.post(
 				"log",
-				f"🎉 Terminé : {verified_count}/{len(photos)} photo{'s' if verified_count != 1 else ''} vérifiée{'s' if verified_count != 1 else ''} après relecture, {problems} avertissement{'s' if problems != 1 else ''}."
+				f"🎉 Terminé : {verified_count}/{total} photo{'s' if verified_count != 1 else ''} vérifiée{'s' if verified_count != 1 else ''} après relecture, {problems} avertissement{'s' if problems != 1 else ''}."
 			)
 			if backups_count:
 				self.post(

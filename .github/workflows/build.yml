@@ -200,11 +200,47 @@ jobs:
           face_tagger.py
       shell: bash
 
-    - name: Upload binaries to Release
+    # ------------------------------------------------------------------
+    # Archive de l'exécutable, nommée d'après le tag, le système et
+    # l'architecture (face_tagger-v1.2.3-linux-x86_64.tar.gz…) : sous
+    # Linux et macOS, PyInstaller produit le même nom (dist/face_tagger),
+    # et le dernier envoyé écrasait l'autre dans la Release.
+    # tar.gz pour Linux / macOS (conserve le droit d'exécution), zip
+    # pour Windows (ouvert nativement par l'Explorateur).
+    # ------------------------------------------------------------------
+    - name: Package executable
+      env:
+        RUNNER_OS_NAME: ${{ runner.os }}
+        RUNNER_ARCH_NAME: ${{ runner.arch }}
+      run: |
+        case "$RUNNER_OS_NAME" in
+          Linux) os="linux" ;;
+          macOS) os="macos" ;;
+          Windows) os="windows" ;;
+          *) echo "❌ Système inconnu : $RUNNER_OS_NAME"; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH_NAME" in
+          X64) arch="x86_64" ;;
+          ARM64) arch="arm64" ;;
+          X86) arch="x86" ;;
+          *) echo "❌ Architecture inconnue : $RUNNER_ARCH_NAME"; exit 1 ;;
+        esac
+        archive="face_tagger-$RELEASE_TAG-$os-$arch"
+        mkdir release
+        if [ "$os" = "windows" ]; then
+          7z a -tzip "release/$archive.zip" ./dist/face_tagger.exe
+        else
+          tar --create --gzip --file "release/$archive.tar.gz" --directory dist face_tagger
+        fi
+        ls -l release
+        echo "✅ Archive release/$archive créée"
+      shell: bash
+
+    - name: Upload archives to Release
       uses: svenstaro/upload-release-action@v2
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: dist/*
+        file: release/*
         tag: ${{ env.RELEASE_TAG }}
         overwrite: true
         file_glob: true

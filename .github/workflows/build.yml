@@ -55,6 +55,41 @@ jobs:
       shell: bash
 
     # ------------------------------------------------------------------
+    # Mise à jour de version.txt d'après le tag (v1.2.3 → 1.2.3.0,
+    # v1.2.3.4 → 1.2.3.4). Seule la copie de travail du runner est modifiée
+    # (rien n'est commité) : l'exécutable porte toujours le numéro de la
+    # release, même si version.txt n'a pas été resynchronisé dans le dépôt.
+    # Un tag d'une autre forme (v2.0-beta…) arrête la compilation, plutôt que
+    # de produire un exécutable avec un numéro faux.
+    # ------------------------------------------------------------------
+    - name: Update version.txt from tag (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        tag="${RELEASE_TAG#v}"
+        if [[ ! "$tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
+          echo "❌ Tag « $RELEASE_TAG » invalide : format attendu v1.2.3 ou v1.2.3.4"
+          exit 1
+        fi
+        major="${BASH_REMATCH[1]}"
+        minor="${BASH_REMATCH[2]}"
+        patch="${BASH_REMATCH[3]}"
+        build="${BASH_REMATCH[5]:-0}"
+        tuple="($major, $minor, $patch, $build)"
+        dotted="$major.$minor.$patch.$build"
+        # filevers / prodvers (tuples) et FileVersion / ProductVersion (texte)
+        sed -E -i \
+          -e "s/(filevers|prodvers)=\([0-9, ]+\)/\1=$tuple/" \
+          -e "s/(StringStruct\('(FileVersion|ProductVersion)', ')[0-9.]+'/\1$dotted'/" \
+          version.txt
+        # Contrôle : les quatre champs doivent avoir été remplacés
+        if [ "$(grep -cF "$tuple" version.txt)" -ne 2 ] || [ "$(grep -cF "'$dotted'" version.txt)" -ne 2 ]; then
+          echo "❌ version.txt n'a pas pu être mis à jour en $dotted"
+          exit 1
+        fi
+        echo "✅ version.txt mis à jour en $dotted"
+      shell: bash
+
+    # ------------------------------------------------------------------
     # Options communes, pour DeepFace :
     # - --collect-submodules : DeepFace charge ses détecteurs et ses modèles
     #   par leur nom (importlib), ce que PyInstaller ne détecte pas seul ;

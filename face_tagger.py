@@ -88,8 +88,7 @@ IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 if HEIF_AVAILABLE:
 	IMAGE_EXTENSIONS |= {".heic", ".heif"}
 
-# Extensions admises pour chaque format d'image reconnu par Pillow (d'après le contenu du fichier, voir photo_format_error).
-# Les autres formats se rabattent sur les extensions que Pillow leur associe (Image.registered_extensions).
+# Extensions admises pour chaque format d'image reconnu par Pillow (d'après le contenu du fichier, voir photo_format_error). Les autres formats se rabattent sur les extensions que Pillow leur associe (Image.registered_extensions).
 FORMAT_EXTENSIONS: dict[str, tuple[str, ...]] = {
 	"JPEG": (".jpg", ".jpeg", ".jpe", ".jfif"),
 	"MPO": (".jpg", ".jpeg", ".mpo"),      # JPEG à plusieurs images (appareils photo 3D, certains smartphones)
@@ -99,41 +98,31 @@ FORMAT_EXTENSIONS: dict[str, tuple[str, ...]] = {
 	"HEIF": (".heic", ".heif"),             # Format annoncé par pillow-heif
 }
 
-# Modèles de reconnaissance de DeepFace proposés, avec leur seuil de similarité cosinus par défaut. Chaque modèle
-# a sa propre échelle de ressemblance : ces seuils sont ceux de DeepFace (deepface/config/threshold.py, exprimés
-# en distance cosinus), convertis en similarité (1 − distance). Tous s'exécutent avec onnxruntime.
+# Modèles de reconnaissance de DeepFace proposés, avec leur seuil de similarité cosinus par défaut. Chaque modèle a sa propre échelle de ressemblance : ces seuils sont ceux de DeepFace (deepface/config/threshold.py, exprimés en distance cosinus), convertis en similarité (1 − distance). Tous s'exécutent avec onnxruntime.
 RECOGNITION_MODELS: dict[str, float] = {
-	"ArcFace": 0.32,            # 512 dimensions : le meilleur compromis précision / vitesse (choix par défaut)
-	"Facenet512": 0.70,         # 512 dimensions : très précis, seuil élevé
-	"GhostFaceNet": 0.35,       # 512 dimensions : léger
-	"SFace": 0.41,              # 128 dimensions : le modèle de l'ancienne version (OpenCV)
+	"ArcFace": 0.32,            # 512 dimensions : le meilleur compromis précision / vitesse (choix par défaut)
+	"Facenet512": 0.70,         # 512 dimensions : très précis, seuil élevé
+	"GhostFaceNet": 0.35,       # 512 dimensions : léger
+	"SFace": 0.41,              # 128 dimensions : le modèle de l'ancienne version (OpenCV)
 	"Facenet": 0.60,            # 128 dimensions
-	"VGG-Face": 0.32,           # 4096 dimensions : lent et volumineux
+	"VGG-Face": 0.32,           # 4096 dimensions : lent et volumineux
 }
 DEFAULT_MODEL: str = "ArcFace"
 
-# Détecteurs de visages de DeepFace proposés. RetinaFace repère bien les visages petits, de profil ou dans la
-# pénombre, mais il est lent : environ 3,5 s par photo sur le processeur, contre 0,35 s pour YuNet (mesuré sur
-# des photos de 2000 pixels, mêmes visages trouvés).
+# Détecteurs de visages de DeepFace proposés. RetinaFace repère bien les visages petits, de profil ou dans la pénombre, mais il est lent : environ 3,5 s par photo sur le processeur, contre 0,35 s pour YuNet (mesuré sur des photos de 2000 pixels, mêmes visages trouvés).
 DETECTOR_BACKENDS: tuple[str, ...] = ("retinaface", "yunet", "centerface", "mtcnn", "ssd", "opencv")
 DEFAULT_DETECTOR: str = "retinaface"
 
-# Moteur d'exécution des réseaux de neurones imposé à DeepFace (s'il n'est pas déjà fixé par la variable
-# d'environnement) : onnxruntime est installé avec DeepFace, alors que TensorFlow ou PyTorch, s'ils sont présents
-# sur le poste, seraient choisis en priorité et donneraient des empreintes légèrement différentes.
+# Moteur d'exécution des réseaux de neurones imposé à DeepFace (s'il n'est pas déjà fixé par la variable d'environnement) : onnxruntime est installé avec DeepFace, alors que TensorFlow ou PyTorch, s'ils sont présents sur le poste, seraient choisis en priorité et donneraient des empreintes légèrement différentes.
 DEEPFACE_ENGINE: str = "onnx"
 
-# Accélération matérielle demandée à DeepFace selon le système : plateforme (sys.platform) → (fournisseur
-# d'onnxruntime qui doit être disponible, nom attendu par DEEPFACE_ONNX_PROVIDERS). Par défaut, DeepFace
-# n'essaie que CUDA puis le processeur : DirectML (Windows, GPU de n'importe quel fabricant via DirectX 12,
-# paquet onnxruntime-directml) et CoreML (macOS, GPU et Neural Engine, inclus dans onnxruntime) doivent
-# lui être demandés explicitement.
+# Accélération matérielle demandée à DeepFace selon le système : plateforme (sys.platform) → (fournisseur d'onnxruntime qui doit être disponible, nom attendu par DEEPFACE_ONNX_PROVIDERS). Par défaut, DeepFace n'essaie que CUDA puis le processeur : DirectML (Windows, GPU de n'importe quel fabricant via DirectX 12, paquet onnxruntime-directml) et CoreML (macOS, GPU et Neural Engine, inclus dans onnxruntime) doivent lui être demandés explicitement.
 ONNX_ACCELERATORS: dict[str, tuple[str, str]] = {
 	"win32": ("DmlExecutionProvider", "directml"),
 	"darwin": ("CoreMLExecutionProvider", "coreml"),
 }
 
-# Bornes du curseur de similarité : assez larges pour couvrir les seuils de tous les modèles ci-dessus
+# Bornes du curseur de similarité : assez larges pour couvrir les seuils de tous les modèles ci-dessus
 THRESHOLD_MIN: float = 0.20
 THRESHOLD_MAX: float = 0.80
 
@@ -143,15 +132,15 @@ TREE_ROW_HEIGHT: int = 44         # Hauteur des lignes de la liste des personnes
 ICON_CACHE_SIZE: int = 4000       # Nombre maximal d'icônes de la liste des personnes gardées en mémoire
 TOOLTIP_DELAY: int = 500          # Délai (en millisecondes) avant l'apparition d'une infobulle, celui de Windows
 TOOLTIP_WIDTH: int = 380          # Largeur maximale (en pixels, écran à 100 %) du texte d'une infobulle
-REGION_MATCH_IOU: float = 0.15      # Recouvrement minimal entre un visage détecté et une région existante
+REGION_MATCH_IOU: float = 0.15    # Recouvrement minimal entre un visage détecté et une région existante
 EXIFTOOL_BATCH: int = 25          # Nombre de photos modifiées par appel à ExifTool
 
 # Polices d'emojis en couleur essayées pour dessiner un emoji dans une image (voir emoji_image), avec la taille de rendu.
 # Les polices à images intégrées n'existent qu'en quelques tailles fixes : toute autre taille fait échouer leur chargement.
 EMOJI_FONTS: tuple[tuple[str, int], ...] = (
-	("seguiemj.ttf", 128),              # Windows : Segoe UI Emoji, vectorielle (toute taille convient)
-	("Apple Color Emoji.ttc", 160),     # macOS : images intégrées, 160 est l'une de leurs tailles
-	("NotoColorEmoji.ttf", 109),        # Linux : images intégrées, en une seule taille
+	("seguiemj.ttf", 128),              # Windows : Segoe UI Emoji, vectorielle (toute taille convient)
+	("Apple Color Emoji.ttc", 160),     # macOS : images intégrées, 160 est l'une de leurs tailles
+	("NotoColorEmoji.ttf", 109),        # Linux : images intégrées, en une seule taille
 )
 
 # Identifiant de l'application pour la barre des tâches de Windows (voir set_windows_app_id)
@@ -202,7 +191,8 @@ SELECTION_COLORS: dict[str, dict[str, str]] = {
 }
 
 # Cadre des vignettes de visages, identique dans les deux thèmes (teintes assez soutenues pour un fond clair comme sombre) :
-# vert pour un visage déjà marqué dans la photo, bleu pour un visage seulement proposé (nom pas encore écrit),
+# vert pour un visage déjà marqué dans la photo,
+# bleu pour un visage seulement proposé (nom pas encore écrit),
 # rouge pour un visage d'une photo en erreur (extension qui ne correspond pas au contenu, écriture refusée…)
 FACE_FRAME_COLORS: dict[str, str] = {
 	"tagged": "#2ea043",
@@ -219,8 +209,7 @@ EMOJI_TEXT_COLORS: dict[str, str] = {
 	"🟥": FACE_FRAME_COLORS["error"],
 }
 
-# Opacité (de 0, invisible, à 1, opaque) du badge 💾 des visages déjà enregistrés, dans l'aperçu d'une photo (voir saved_badge) :
-# assez transparent pour laisser voir le visage en dessous, le fond l'étant plus que la disquette pour qu'elle reste lisible
+# Opacité (de 0, invisible, à 1, opaque) du badge 💾 des visages déjà enregistrés, dans l'aperçu d'une photo (voir saved_badge) : assez transparent pour laisser voir le visage en dessous, le fond l'étant plus que la disquette pour qu'elle reste lisible
 SAVED_BADGE_OPACITY: dict[str, float] = {
 	"background": 0.35,
 	"icon": 0.50,
@@ -470,16 +459,16 @@ def list_photos(directory: str) -> list[str]:
 	return photos
 
 
-def photo_format_error(photo: str) -> Optional[str]:
-	"""Vérifie que l'extension d'une photo correspond à son contenu (une image PNG nommée `*.jpg`, par exemple).
+def photo_real_format(photo: str) -> Optional[tuple[str, tuple[str, ...]]]:
+	"""Reconnaît le format réel d'une photo d'après son contenu, et donne les extensions qui lui conviennent.
 
-	Pillow reconnaît le format d'après les premiers octets du fichier, sans tenir compte de son nom : une photo mal nommée s'analyse donc normalement. ExifTool, lui, refuse d'écrire dans un fichier dont l'extension ne correspond pas au contenu (« Not a valid JPG (looks more like a PNG) ») : mieux vaut le signaler avant l'écriture. Seul l'en-tête est lu : la vérification est rapide.
+	Pillow reconnaît le format d'après les premiers octets du fichier, sans tenir compte de son nom. Seul l'en-tête est lu : la vérification est rapide. Utilisée par `photo_format_error` et par le script `fix_extensions.py`, qui renomme les photos mal nommées : tous deux appliquent ainsi la même règle.
 
 	Args:
 		photo (str): Chemin de la photo.
 
 	Returns:
-		Optional[str]: Description de l'erreur, ou `None` si l'extension convient (ou si le format n'est pas reconnu par Pillow : l'analyse l'aura déjà signalé).
+		Optional[tuple[str, tuple[str, ...]]]: Nom du format selon Pillow (« `PNG` », « `JPEG` »…) et extensions admises, en minuscules, la préférée en tête ; `None` si le fichier est illisible, si Pillow ne reconnaît pas son format ou s'il ne lui associe aucune extension.
 	"""
 	try:
 		with Image.open(photo) as image:
@@ -488,15 +477,33 @@ def photo_format_error(photo: str) -> Optional[str]:
 		return None
 	if not image_format:
 		return None
-	extension = Path(photo).suffix.lower()
 	expected = FORMAT_EXTENSIONS.get(image_format) or tuple(sorted(
 		suffix for suffix, name in Image.registered_extensions().items() if name.upper() == image_format
 	))
-	if not expected or extension in expected:
+	return (image_format, expected) if expected else None
+
+
+def photo_format_error(photo: str) -> Optional[str]:
+	"""Vérifie que l'extension d'une photo correspond à son contenu (une image PNG nommée `*.jpg`, par exemple).
+
+	Une photo mal nommée s'analyse normalement, car Pillow ignore le nom du fichier (voir `photo_real_format`). ExifTool, lui, refuse d'écrire dans un fichier dont l'extension ne correspond pas au contenu (« Not a valid JPG (looks more like a PNG) ») : mieux vaut le signaler avant l'écriture.
+
+	Args:
+		photo (str): Chemin de la photo.
+
+	Returns:
+		Optional[str]: Description de l'erreur, ou `None` si l'extension convient (ou si le format n'est pas reconnu par Pillow : l'analyse l'aura déjà signalé).
+	"""
+	real_format = photo_real_format(photo)
+	if real_format is None:
+		return None
+	image_format, expected = real_format
+	extension = Path(photo).suffix.lower()
+	if extension in expected:
 		return None
 	return (
 		f"Extension « {extension or '(aucune)'} » incorrecte : ce fichier est en réalité une image {image_format}. "
-		f"Renommez-le en « {Path(photo).stem}{expected[0]} » : ExifTool refuse d'écrire les noms dans un fichier dont l'extension ne correspond pas au contenu."
+		f"Renommez-le en « {Path(photo).stem}{expected[0]} » (fix_extensions.py renomme d'un coup les photos de la base) : ExifTool refuse d'écrire les noms dans un fichier dont l'extension ne correspond pas au contenu."
 	)
 
 
@@ -2355,7 +2362,7 @@ class UnknownNamesDialog(tk.Toplevel):
 		self.person = self.pending[self.index]
 		self.header.configure(text = emoji(
 			f"👤 Personne {self.index + 1} / {len(self.pending)} — "
-			f"{len(self.person.faces)} visage{'s' if len(self.person.faces) != 1 else ''} dans {len(self.person.photos)} photo{'s' if len(self.person.photos) != 1 else ''}"
+			f"{len(self.person.faces)} visage{'s' if len(self.person.faces) > 1 else ''} dans {len(self.person.photos)} photo{'s' if len(self.person.photos) > 1 else ''}"
 		))
 		for child in self.gallery.winfo_children():
 			child.destroy()
@@ -2548,8 +2555,8 @@ class FaceTaggerApp(tk.Tk):
 			self.log("⚠️ ExifTool est introuvable : la lecture et l'écriture des métadonnées sont désactivées.")
 			self.log("👉 Fedora : sudo dnf install perl-Image-ExifTool — Debian/Ubuntu : sudo apt install libimage-exiftool-perl")
 		stats = self.database.statistics()
-		self.log(f"🗄️ Base de données : {self.database.path} ({stats['photos']} photo{'s' if stats['photos'] != 1 else ''}, {stats['faces']} visage{'s' if stats['faces'] != 1 else ''}, "
-				f"{stats['backups']} sauvegarde{'s' if stats['backups'] != 1 else ''} *_original suivie{'s' if stats['backups'] != 1 else ''}).")
+		self.log(f"🗄️ Base de données : {self.database.path} ({stats['photos']} photo{'s' if stats['photos'] > 1 else ''}, {stats['faces']} visage{'s' if stats['faces'] > 1 else ''}, "
+				f"{stats['backups']} sauvegarde{'s' if stats['backups'] > 1 else ''} *_original suivie{'s' if stats['backups'] > 1 else ''}).")
 		self.log(f"🧠 Reconnaissance des visages : DeepFace, détecteur {options.detector}, modèle {options.model}, seuil {options.threshold:.2f}.")
 
 	# ---------- Construction de la fenêtre ----------
@@ -3065,7 +3072,7 @@ class FaceTaggerApp(tk.Tk):
 		self.chosen_photos = files
 		folders = {os.path.dirname(path) for path in files}
 		where = f"dans {folders.pop()}" if len(folders) == 1 else f"dans {len(folders)} dossiers"
-		self.chosen_label = emoji(f"📑 {len(files)} photo{'s' if len(files) != 1 else ''} choisie{'s' if len(files) != 1 else ''} {where}")
+		self.chosen_label = emoji(f"📑 {len(files)} photo{'s' if len(files) > 1 else ''} choisie{'s' if len(files) > 1 else ''} {where}")
 		self.directory_var.set(self.chosen_label)
 
 	def using_chosen_photos(self) -> bool:
@@ -3166,9 +3173,9 @@ class FaceTaggerApp(tk.Tk):
 				if not photos:
 					self.post("log", "⚠️ Aucune photo trouvée dans ce dossier.")
 					return
-				self.post("log", f"🖼️ {len(photos)} photo{'s' if len(photos) != 1 else ''} trouvée{'s' if len(photos) != 1 else ''}.")
+				self.post("log", f"🖼️ {len(photos)} photo{'s' if len(photos) > 1 else ''} trouvée{'s' if len(photos) > 1 else ''}.")
 			else:
-				self.post("log", f"📑 {len(photos)} photo{'s' if len(photos) != 1 else ''} choisie{'s' if len(photos) != 1 else ''}.")
+				self.post("log", f"📑 {len(photos)} photo{'s' if len(photos) > 1 else ''} choisie{'s' if len(photos) > 1 else ''}.")
 
 			# Si le moteur ou les paramètres de détection ont changé, les visages mémorisés ne sont plus valables :
 			# les empreintes de deux modèles différents ne sont pas comparables entre elles
@@ -3214,7 +3221,7 @@ class FaceTaggerApp(tk.Tk):
 					self.database.store_analysis(photo, stat.st_mtime_ns, stat.st_size, found)
 					analysed += 1
 				processed.add(photo)
-			self.post("log", f"🗄️ {reused} photo{'s' if reused != 1 else ''} reprise{'s' if reused != 1 else ''} depuis la base, {analysed} analysée{'s' if analysed != 1 else ''}, {failures} en échec.")
+			self.post("log", f"🗄️ {reused} photo{'s' if reused > 1 else ''} reprise{'s' if reused > 1 else ''} depuis la base, {analysed} analysée{'s' if analysed > 1 else ''}, {failures} en échec.")
 
 			# Les visages viennent de la base (sans les vignettes, lues plus tard à la demande)
 			library = Library()
@@ -3223,7 +3230,7 @@ class FaceTaggerApp(tk.Tk):
 					photo = photo, box = (x, y, width, height), score = score,
 					embedding = np.frombuffer(blob, dtype = np.float32), face_id = face_id,
 				))
-			self.post("log", f"✅ {len(library.faces)} visage{'s' if len(library.faces) != 1 else ''} au total.")
+			self.post("log", f"✅ {len(library.faces)} visage{'s' if len(library.faces) > 1 else ''} au total.")
 
 			# Contrôle du format des photos qui ont des visages (les seules affichées) : une extension qui ne
 			# correspond pas au contenu ne gêne pas l'analyse, mais ExifTool refuserait d'y écrire les noms.
@@ -3238,7 +3245,7 @@ class FaceTaggerApp(tk.Tk):
 					self.post("log", f"🟥 {os.path.basename(photo)} : {error}")
 			if library.photo_errors:
 				count = len(library.photo_errors)
-				self.post("log", f"⚠️ {count} photo{'s' if count != 1 else ''} en erreur (cadre rouge) : {'leurs' if count != 1 else 'ses'} noms ne seront pas écrits tant que l'erreur demeure.")
+				self.post("log", f"⚠️ {count} photo{'s' if count > 1 else ''} en erreur (cadre rouge) : {'leurs' if count != 1 else 'ses'} noms ne seront pas écrits tant que l'erreur demeure.")
 
 			# Étiquettes déjà présentes : d'abord depuis la base, ExifTool ne lit que les photos manquantes
 			if self.exiftool.available and library.faces:
@@ -3258,15 +3265,15 @@ class FaceTaggerApp(tk.Tk):
 					library.photo_tags[photo] = parse_photo_tags(stored.get(photo, {}))
 				unmatched = library.label_faces()
 				labeled = sum(1 for face in library.faces if face.label)
-				self.post("log", f"🏷️ {labeled} visage{'s' if labeled != 1 else ''} rattaché{'s' if labeled != 1 else ''} à un nom déjà présent dans les photos.")
+				self.post("log", f"🏷️ {labeled} visage{'s' if labeled > 1 else ''} rattaché{'s' if labeled > 1 else ''} à un nom déjà présent dans les photos.")
 				if unmatched:
-					self.post("log", f"ℹ️ {unmatched} région{'s' if unmatched != 1 else ''} nommée{'s' if unmatched != 1 else ''} sans visage détecté correspondant.")
+					self.post("log", f"ℹ️ {unmatched} région{'s' if unmatched > 1 else ''} nommée{'s' if unmatched > 1 else ''} sans visage détecté correspondant.")
 
 			library.rebuild(threshold, use_keywords)
 			named = sum(1 for person in library.persons.values() if person.name)
-			self.post("log", f"👥 {len(library.persons)} personne{'s' if len(library.persons) != 1 else ''} regroupée{'s' if len(library.persons) != 1 else ''}, dont {named} nommée{'s' if named != 1 else ''} automatiquement.")
+			self.post("log", f"👥 {len(library.persons)} personne{'s' if len(library.persons) > 1 else ''} regroupée{'s' if len(library.persons) > 1 else ''}, dont {named} nommée{'s' if named > 1 else ''} automatiquement.")
 			self.post("library", library)
-			self.post("progress", 1, 1, f"✅ Analyse terminée : {len(library.persons)} personne{'s' if len(library.persons) != 1 else ''}.")
+			self.post("progress", 1, 1, f"✅ Analyse terminée : {len(library.persons)} personne{'s' if len(library.persons) > 1 else ''}.")
 		except Exception as error:
 			self.post("log", f"❌ Erreur : {error}")
 		finally:
@@ -3283,7 +3290,7 @@ class FaceTaggerApp(tk.Tk):
 			return
 		self.library.rebuild(float(self.threshold_var.get()), self.keywords_var.get())
 		self.refresh_persons()
-		self.log(f"🔄 Regroupement refait avec le seuil {self.threshold_var.get():.2f} : {len(self.library.persons)} personne{'s' if len(self.library.persons) != 1 else ''}.")
+		self.log(f"🔄 Regroupement refait avec le seuil {self.threshold_var.get():.2f} : {len(self.library.persons)} personne{'s' if len(self.library.persons) > 1 else ''}.")
 
 	# ---------- Liste des personnes ----------
 
@@ -3412,12 +3419,12 @@ class FaceTaggerApp(tk.Tk):
 		if person.name and not person.ignored and self.exiftool.available and any(self.write_fields()):
 			missing = len(self.missing_photos(person))
 			if missing:
-				status += (f"\n✏️ Nom absent de {missing} photo{'s' if missing != 1 else ''} : "
+				status += (f"\n✏️ Nom absent de {missing} photo{'s' if missing > 1 else ''} : "
 					"« Valider la personne » l'y écrit.")
 			else:
 				status += "\n✅ Nom présent dans toutes ses photos : rien à écrire."
 		return (
-			f"👤 {person.display_name} — {len(person.faces)} visage{'s' if len(person.faces) != 1 else ''} dans {len(person.photos)} photo{'s' if len(person.photos) != 1 else ''}\n{status}\n"
+			f"👤 {person.display_name} — {len(person.faces)} visage{'s' if len(person.faces) > 1 else ''} dans {len(person.photos)} photo{'s' if len(person.photos) > 1 else ''}\n{status}\n"
 			"🖱️ Double-clic : renommer — Ctrl ou Maj + clic : sélectionner plusieurs personnes"
 		)
 
@@ -3570,9 +3577,9 @@ class FaceTaggerApp(tk.Tk):
 		photos = len(person.photos)
 		error_text = f", 🟥 {errors} en erreur" if errors else ""
 		self.person_title.set_text((
-			f"{'🙈 ' if person.ignored else '👤 '}{person.display_name} — {total} visage{'s' if total != 1 else ''} "
+			f"{'🙈 ' if person.ignored else '👤 '}{person.display_name} — {total} visage{'s' if total > 1 else ''} "
 			f"(🟩 {tagged} marqué{'s' if tagged > 1 else ''}, 🟦 {proposed} proposé{'s' if proposed > 1 else ''}{error_text}), "
-			f"{photos} photo{'s' if photos != 1 else ''}"
+			f"{photos} photo{'s' if photos > 1 else ''}"
 		))
 
 	def person_title_tooltip(self, event: tk.Event) -> Optional[str]:
@@ -3718,7 +3725,7 @@ class FaceTaggerApp(tk.Tk):
 			label.configure(style = "SelectedFace.TLabel" if face in self.selected_faces else "Face.TLabel")
 		count = len(self.selected_faces)
 		if count:
-			text = f"☑ {count} visage{'s' if count != 1 else ''} sélectionné{'s' if count != 1 else ''}"
+			text = f"☑ {count} visage{'s' if count > 1 else ''} sélectionné{'s' if count > 1 else ''}"
 		else:
 			text = "Aucun visage sélectionné"
 		self.selection_label.configure(text = emoji(text))
@@ -3784,7 +3791,7 @@ class FaceTaggerApp(tk.Tk):
 		)
 		if dialog.result:
 			merged = self.library.rename(person, dialog.result)
-			self.log(f"✍️ « {merged.name} » : {len(merged.faces)} visage{'s' if len(merged.faces) != 1 else ''}")
+			self.log(f"✍️ « {merged.name} » : {len(merged.faces)} visage{'s' if len(merged.faces) > 1 else ''}")
 			self.refresh_persons(select = [merged.identifier])
 
 	def merge_selected(self) -> None:
@@ -3873,7 +3880,7 @@ class FaceTaggerApp(tk.Tk):
 		dialog = NameDialog(
 			self,
 			"↪️ Déplacer les visages" if count > 1 else "↪️ Déplacer le visage",
-			f"Nom de la personne de destination ({count} visage{'s' if count != 1 else ''}) :",
+			f"Nom de la personne de destination ({count} visage{'s' if count > 1 else ''}) :",
 			self.known_names()
 		)
 		if not dialog.result:
@@ -3884,7 +3891,7 @@ class FaceTaggerApp(tk.Tk):
 			return
 		for face in faces:
 			self.library.move_face(face, target)
-		self.log(f"↪️ {count} visage{'s' if count != 1 else ''} déplacé{'s' if count != 1 else ''} vers « {target.display_name} »")
+		self.log(f"↪️ {count} visage{'s' if count > 1 else ''} déplacé{'s' if count > 1 else ''} vers « {target.display_name} »")
 		self.after_faces_changed(origin, fallback = target)
 
 	def detach_selected_faces(self) -> None:
@@ -3895,7 +3902,7 @@ class FaceTaggerApp(tk.Tk):
 		person = self.library.new_person()
 		for face in faces:
 			self.library.move_face(face, person)
-		self.log(f"✂️ {len(faces)} visage{'s' if len(faces) != 1 else ''} détaché{'s' if len(faces) != 1 else ''} dans « {person.display_name} »")
+		self.log(f"✂️ {len(faces)} visage{'s' if len(faces) > 1 else ''} détaché{'s' if len(faces) > 1 else ''} dans « {person.display_name} »")
 		self.after_faces_changed(person)
 
 	def delete_selected_faces(self) -> None:
@@ -3911,7 +3918,7 @@ class FaceTaggerApp(tk.Tk):
 		origin = self.current_person
 		for face in faces:
 			self.library.delete_face(face)
-		self.log(f"🗑️ {len(faces)} visage{'s' if len(faces) != 1 else ''} écarté{'s' if len(faces) != 1 else ''}")
+		self.log(f"🗑️ {len(faces)} visage{'s' if len(faces) > 1 else ''} écarté{'s' if len(faces) > 1 else ''}")
 		self.after_faces_changed(origin)
 
 	# ---------- Écriture des métadonnées (thread de travail) ----------
@@ -3989,13 +3996,13 @@ class FaceTaggerApp(tk.Tk):
 		if not updates:
 			messagebox.showinfo(
 				emoji("✅ Valider"),
-				emoji(f"✅ « {person.name} » figure déjà dans les métadonnées de ses {len(person.photos)} photo{'s' if len(person.photos) != 1 else ''}."),
+				emoji(f"✅ « {person.name} » figure déjà dans les métadonnées de ses {len(person.photos)} photo{'s' if len(person.photos) > 1 else ''}."),
 			)
 			return
 		count = len(updates)
 		if not messagebox.askyesno(
 			emoji("✅ Valider"),
-			emoji(f"Écrire « {person.name} » dans les métadonnées de {count} photo{'s' if count != 1 else ''} ?{self.backup_note()}"),
+			emoji(f"Écrire « {person.name} » dans les métadonnées de {count} photo{'s' if count > 1 else ''} ?{self.backup_note()}"),
 		):
 			return
 		self.launch_write(updates)
@@ -4014,7 +4021,7 @@ class FaceTaggerApp(tk.Tk):
 		names = {name for items in updates.values() for name, _ in items}
 		if not messagebox.askyesno(
 			emoji("💾 Écriture"),
-			emoji(f"Écrire {len(names)} nom{'s' if len(names) != 1 else ''} dans les métadonnées de {len(updates)} photo{'s' if len(updates) != 1 else ''} ?{self.backup_note()}"),
+			emoji(f"Écrire {len(names)} nom{'s' if len(names) > 1 else ''} dans les métadonnées de {len(updates)} photo{'s' if len(updates) > 1 else ''} ?{self.backup_note()}"),
 		):
 			return
 		self.launch_write(updates)
@@ -4061,7 +4068,7 @@ class FaceTaggerApp(tk.Tk):
 			photos = list(updates)
 			self.post(
 				"log",
-				f"💾 Écriture des métadonnées de {len(photos)} photo{'s' if len(photos) != 1 else ''}…"
+				f"💾 Écriture des métadonnées de {len(photos)} photo{'s' if len(photos) > 1 else ''}…"
 			)
 			problems = verified_count = backups_count = 0
 			total = len(photos)
@@ -4188,16 +4195,16 @@ class FaceTaggerApp(tk.Tk):
 				"progress",
 				total,
 				total,
-				f"✅ Écriture terminée ({problems} avertissement{'s' if problems != 1 else ''})."
+				f"✅ Écriture terminée ({problems} avertissement{'s' if problems > 1 else ''})."
 			)
 			self.post(
 				"log",
-				f"🎉 Terminé : {verified_count}/{total} photo{'s' if verified_count != 1 else ''} vérifiée{'s' if verified_count != 1 else ''} après relecture, {problems} avertissement{'s' if problems != 1 else ''}."
+				f"🎉 Terminé : {verified_count}/{total} photo{'s' if verified_count > 1 else ''} vérifiée{'s' if verified_count > 1 else ''} après relecture, {problems} avertissement{'s' if problems > 1 else ''}."
 			)
 			if backups_count:
 				self.post(
 					"log",
-					f"📦 {backups_count} sauvegarde{'s' if backups_count != 1 else ''} *_original disponible{'s' if backups_count != 1 else ''} — bouton « Restaurer les sauvegardes » ou restore_originals.py."
+					f"📦 {backups_count} sauvegarde{'s' if backups_count > 1 else ''} *_original disponible{'s' if backups_count > 1 else ''} — bouton « Restaurer les sauvegardes » ou restore_originals.py."
 				)
 		except Exception as error:
 			self.post("log", f"❌ Erreur pendant l'écriture : {error}")
@@ -4223,7 +4230,7 @@ class FaceTaggerApp(tk.Tk):
 			return
 		if not messagebox.askyesno(
 			emoji("♻️ Restauration"),
-			emoji(f"Remplacer {len(backups)} photo{'s' if len(backups) != 1 else ''} par leur version d'origine ?\n"
+			emoji(f"Remplacer {len(backups)} photo{'s' if len(backups) > 1 else ''} par leur version d'origine ?\n"
 				"Les noms écrits dans leurs métadonnées seront perdus, et la liste des personnes sera vidée si elle contient ces photos (relancez ensuite « Analyser »)."),
 		):
 			return
@@ -4246,7 +4253,7 @@ class FaceTaggerApp(tk.Tk):
 		try:
 			self.post(
 				"log",
-				f"♻️ Restauration de {len(backups)} photo{'s' if len(backups) != 1 else ''}…"
+				f"♻️ Restauration de {len(backups)} photo{'s' if len(backups) > 1 else ''}…"
 			)
 			done, failed = restore_originals.restore_backups(
 				backups,
@@ -4255,7 +4262,7 @@ class FaceTaggerApp(tk.Tk):
 			)
 			self.post(
 				"log",
-				f"🎉 Terminé : {done} photo{'s' if done != 1 else ''} restaurée{'s' if done != 1 else ''}, {failed} échec{'s' if failed != 1 else ''}."
+				f"🎉 Terminé : {done} photo{'s' if done > 1 else ''} restaurée{'s' if done > 1 else ''}, {failed} échec{'s' if failed > 1 else ''}."
 			)
 			self.post(
 				"restored",

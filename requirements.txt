@@ -2,6 +2,7 @@ deepface
 pillow
 pillow-heif
 numpy
+tqdm
 pyinstaller
 
 # Moteur onnxruntime : la meilleure variante disponible sur chaque plateforme.

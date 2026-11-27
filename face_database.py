@@ -336,6 +336,45 @@ class Database:
 		with self.connection as connection:
 			connection.execute("UPDATE photos SET mtime_ns = ?, size = ? WHERE path = ?", (mtime_ns, size, path))
 
+	def rename_photo(
+			self,
+			old_path: str,
+			new_path: str,
+			old_backup: Optional[str] = None,
+			new_backup: Optional[str] = None
+		) -> None:
+		"""Reporte dans la base le renommage d'une photo (par `fix_extensions.py`, quand son extension ne correspondait pas à son format).
+
+		La photo garde ses visages, ses étiquettes mémorisées et son historique : seul leur chemin change. Sa signature n'est pas touchée, car un renommage conserve la date de modification et la taille du fichier : la photo ne sera donc ni ré-analysée ni relue à la prochaine analyse. Le chemin « `SourceFile` » de l'entrée JSON d'ExifTool est corrigé lui aussi. Tout se fait dans une seule transaction : en cas d'erreur, la base reste inchangée.
+
+		Args:
+			old_path (str): Ancien chemin de la photo, tel qu'il est enregistré dans la base.
+			new_path (str): Nouveau chemin de la photo.
+			old_backup (Optional[str]): Ancien chemin de sa sauvegarde `*_original`, si elle a été renommée avec la photo ; `None` sinon.
+			new_backup (Optional[str]): Nouveau chemin de cette sauvegarde (ignoré si `old_backup` vaut `None`).
+
+		Raises:
+			ValueError: Si `new_path` est déjà enregistré dans la base (sous Windows, sans tenir compte de la casse).
+		"""
+		# Sous Windows, les chemins ne distinguent pas majuscules et minuscules
+		match = "= ? COLLATE NOCASE" if os.name == "nt" else "= ?"
+		with self.connection as connection:
+			if connection.execute(f"SELECT 1 FROM photos WHERE path {match}", (new_path,)).fetchone():
+				raise ValueError(f"La base contient déjà une photo « {new_path} ».")
+			row = connection.execute("SELECT tags_json FROM photos WHERE path = ?", (old_path,)).fetchone()
+			tags_json: Optional[str] = row[0] if row else None
+			if tags_json:
+				entry: dict = json.loads(tags_json)
+				if "SourceFile" in entry:
+					# ExifTool reçoit et renvoie les chemins avec des barres obliques (voir ExifTool.read_tags)
+					entry["SourceFile"] = Path(new_path).as_posix()
+					tags_json = json.dumps(entry, ensure_ascii = False)
+			connection.execute("UPDATE photos SET path = ?, tags_json = ? WHERE path = ?", (new_path, tags_json, old_path))
+			connection.execute("UPDATE faces SET photo = ? WHERE photo = ?", (new_path, old_path))
+			connection.execute(f"UPDATE modifications SET photo = ? WHERE photo {match}", (new_path, old_path))
+			if old_backup is not None and new_backup is not None:
+				connection.execute(f"UPDATE modifications SET backup_path = ? WHERE backup_path {match}", (new_backup, old_backup))
+
 	# ---------- Historique des modifications ----------
 
 	def record_modification(

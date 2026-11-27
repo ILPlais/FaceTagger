@@ -159,12 +159,15 @@ jobs:
       shell: bash
 
     # ------------------------------------------------------------------
-    # DeepFace dépend de « onnxruntime », que pip installe donc à côté de
-    # « onnxruntime-directml » : les deux paquets écrivent dans le même
-    # dossier « onnxruntime », et selon l'ordre d'installation DirectML
-    # disparaît ou les deux versions se mélangent. On les retire tous les
-    # deux, puis on réinstalle seulement DirectML (ses dépendances sont
-    # déjà présentes).
+    # requirements.txt installe « onnxruntime » partout. Sous Windows x86_64
+    # (seule plateforme où PyPI publie DirectML), on le remplace ici :
+    # les deux paquets écrivent dans le même dossier « onnxruntime », il faut
+    # donc retirer l'un avant d'installer l'autre (ses dépendances sont déjà
+    # présentes, d'où --no-deps). Le choix se fait par runner.arch et non
+    # par un marqueur « platform_machine » dans requirements.txt : sur
+    # windows-11-arm, ce marqueur valait AMD64 alors que Python est ARM64.
+    # Les métadonnées de « onnxruntime » disparaissent : le hook
+    # hooks/hook-deepface.py en tient compte.
     # ------------------------------------------------------------------
     - name: Keep only onnxruntime-directml (Windows x86_64)
       if: runner.os == 'Windows' && runner.arch == 'X64'
@@ -199,12 +202,12 @@ jobs:
       shell: bash
 
     # ------------------------------------------------------------------
-    # Options communes, pour DeepFace :
-    # - --collect-submodules : DeepFace charge ses détecteurs et ses modèles
-    #   par leur nom (importlib), ce que PyInstaller ne détecte pas seul ;
-    # - --recursive-copy-metadata : gdown, utilisé par DeepFace pour
-    #   télécharger les poids des modèles, lit ses propres métadonnées.
-    # Vérifié par une compilation réelle sous Windows.
+    # Option commune, pour DeepFace : --additional-hooks-dir hooks charge
+    # hooks/hook-deepface.py, qui ajoute les modules que DeepFace importe
+    # par leur nom (importlib) et les métadonnées de ses dépendances (gdown
+    # lit les siennes). Il remplace --collect-submodules et
+    # --recursive-copy-metadata deepface : ce dernier échouait sous Windows
+    # x86_64, où « onnxruntime » est remplacé par « onnxruntime-directml ».
     # ------------------------------------------------------------------
     # Compilation sous Windows (séparateur ';' et support de --version-file)
     # ------------------------------------------------------------------
@@ -215,9 +218,7 @@ jobs:
           --icon=face_tagger.ico \
           --version-file=version.txt \
           --add-data "face_tagger.ico;." \
-          --collect-submodules deepface.models \
-          --collect-submodules deepface.modules \
-          --recursive-copy-metadata deepface \
+          --additional-hooks-dir hooks \
           face_tagger.py
       shell: bash
 
@@ -231,9 +232,7 @@ jobs:
         pyinstaller --onefile \
           --icon=face_tagger.ico \
           --add-data "face_tagger.ico:." \
-          --collect-submodules deepface.models \
-          --collect-submodules deepface.modules \
-          --recursive-copy-metadata deepface \
+          --additional-hooks-dir hooks \
           face_tagger.py
       shell: bash
 

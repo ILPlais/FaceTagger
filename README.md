@@ -42,6 +42,10 @@ Puis, dans le dossier du dépôt (PowerShell) :
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install --requirement requirements.txt
+
+# Windows x86_64 uniquement : accélération par la carte graphique (DirectML)
+pip uninstall --yes onnxruntime onnxruntime-directml
+pip install --no-deps onnxruntime-directml
 ```
 
 > ⚠️ DeepFace installe `opencv-contrib-python-headless`. Si l'environnement contient déjà `opencv-python` (version précédente de FaceTagger), désinstallez-le d'abord : les deux paquets entrent en conflit.

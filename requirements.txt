@@ -5,12 +5,14 @@ numpy
 tqdm
 pyinstaller
 
-# Moteur onnxruntime : la meilleure variante disponible sur chaque plateforme.
-# Windows x86_64 : DirectML (GPU de n'importe quel fabricant via DirectX 12). DeepFace ne l'utilise que si
-# DEEPFACE_ONNX_PROVIDERS le demande, ce que fait load_deepface. Paquet publié uniquement pour win_amd64.
-onnxruntime-directml; sys_platform == "win32" and platform_machine == "AMD64"
-# Windows ARM64 : pas de DirectML sur PyPI, version standard (processeur).
-# macOS (Apple Silicon) : la version standard contient déjà CoreML.
-# Linux : version standard (processeur). onnxruntime-gpu (CUDA) imposerait les bibliothèques NVIDIA (plusieurs Go)
-# et alourdirait d'autant l'exécutable PyInstaller.
-onnxruntime; sys_platform != "win32" or platform_machine != "AMD64"
+# Moteur onnxruntime : version standard partout (processeur ; CoreML compris sous macOS).
+# Linux : onnxruntime-gpu (CUDA) imposerait les bibliothèques NVIDIA (plusieurs Go) et alourdirait d'autant
+# l'exécutable PyInstaller.
+# Windows x86_64 : remplacer ensuite onnxruntime par onnxruntime-directml (GPU de n'importe quel fabricant via
+# DirectX 12), publié uniquement pour win_amd64 :
+#     pip uninstall --yes onnxruntime onnxruntime-directml
+#     pip install --no-deps onnxruntime-directml
+# Il n'est pas choisi ici par un marqueur « platform_machine == "AMD64" » : sur le runner Windows ARM64 de GitHub,
+# ce marqueur a valu AMD64 alors que Python était ARM64 (cause probable, non vérifiée : variable PROCESSOR_ARCHITECTURE
+# héritée du shell bash émulé en x64), et pip cherchait un paquet DirectML introuvable.
+onnxruntime
